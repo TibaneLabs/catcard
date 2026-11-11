@@ -7632,9 +7632,6 @@ pub(crate) fn choose(ui: &mut Ui<'_>, head: &str, note: &str, items: &[&str]) ->
 }
 
 /// One row of a [`toggle_list`]: what the row shows, and whether it is on.
-// Generic, with one caller today -- the host-wallet chain picker, which only a
-// multichain build has. Kept in every build rather than gated to that one caller.
-#[cfg_attr(not(feature = "multichain"), allow(dead_code))]
 pub(crate) struct Toggle<'a> {
     /// The row as it is drawn -- a name, and a mark (a chain's logo) where there is one.
     /// Its id and its box are the list's to set.
@@ -7643,9 +7640,6 @@ pub(crate) struct Toggle<'a> {
 }
 
 /// Most rows a [`toggle_list`] takes. Every chain this firmware knows fits, with room.
-// Generic: the host-wallet chain picker (multichain builds) and TSS Rebuild setup's
-// "who is here" use it; a Bitcoin-only mk3 has neither.
-#[cfg_attr(not(feature = "multichain"), allow(dead_code))]
 pub(crate) const TOGGLE_MAX: usize = 24;
 
 /// A list of on/off rows and one action row under them.
@@ -7666,10 +7660,27 @@ pub(crate) fn toggle_list(
     rows: &mut [Toggle<'_>],
     action: &str,
 ) -> Option<()> {
+    toggle_list_from(ui, head, note, rows, action, false)
+}
+
+/// [`toggle_list`], with the cursor starting on the action row when `on_action` is set.
+///
+/// For a list whose rows are an extra the person may want rather than the thing they came
+/// to set: OK straight away then does the action and leaves every row as it was, where in
+/// [`toggle_list`] the first OK flips the first row. The host-wallet "Allow during
+/// session" box is the case -- a grant nobody should give by pressing OK once.
+pub(crate) fn toggle_list_from(
+    ui: &mut Ui<'_>,
+    head: &str,
+    note: &str,
+    rows: &mut [Toggle<'_>],
+    action: &str,
+    on_action: bool,
+) -> Option<()> {
     use catcard_ui::scroll::{Line as DLine, ScrollView};
 
     let n = rows.len().min(TOGGLE_MAX);
-    let mut cursor = 0usize;
+    let mut cursor = if on_action { n } else { 0 };
     let mut off = 0usize;
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();

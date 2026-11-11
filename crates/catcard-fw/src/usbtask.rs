@@ -1314,6 +1314,9 @@ impl UsbTask {
                 | Opcode::HostSignCommit
                 | Opcode::HostResult
                 | Opcode::HostAbort
+                | Opcode::HostAddressAt
+                | Opcode::HostSignMessage
+                | Opcode::HostInfo
                 | Opcode::RngSample
                 | Opcode::RngHealth,
             ) => self.begin_reply(Status::UnknownOpcode, &[]),
@@ -1630,7 +1633,10 @@ impl UsbTask {
                 | Opcode::HostSignData
                 | Opcode::HostSignCommit
                 | Opcode::HostResult
-                | Opcode::HostAbort),
+                | Opcode::HostAbort
+                | Opcode::HostAddressAt
+                | Opcode::HostSignMessage
+                | Opcode::HostInfo),
             ) => {
                 if !self.chan.host_wallet_allowed() {
                     return (Status::UnknownOpcode, 0);
@@ -1639,6 +1645,8 @@ impl UsbTask {
                 let cx = crate::hostwallet::Cx {
                     session: self.chan.id(),
                     exposed: self.chan.state().map_or(&[][..], |s| &s.exposed[..]),
+                    shared: self.chan.state().map_or(&[][..], |s| s.shared()),
+                    paths_allowed: self.chan.state().is_some_and(|s| s.paths_allowed),
                     unlocked: self.unlocked,
                     upgrade_busy,
                 };
@@ -3250,12 +3258,40 @@ pub(crate) fn host_expose(ticket: u32, list: &[catcard_wallet::hostkeys::Exposed
     .unwrap_or(false)
 }
 
-/// The wallet in force changed: what the open session was shown describes the old one.
+/// Whether the session `ticket` may have an address by its path without a question: the
+/// person ticked "Allow during session", and it is still that session.
+pub(crate) fn host_paths_allowed(ticket: u32) -> bool {
+    with_task(|t| t.chan.is_current(ticket) && t.chan.state().is_some_and(|s| s.paths_allowed))
+        .unwrap_or(false)
+}
+
+/// The person ticked "Allow during session" for the session `ticket`. False when that
+/// session has already ended, and then nothing was allowed.
+pub(crate) fn host_allow_paths(ticket: u32) -> bool {
+    with_task(|t| match t.chan.state_mut(ticket) {
+        Some(st) => {
+            st.paths_allowed = true;
+            true
+        }
+        None => false,
+    })
+    .unwrap_or(false)
+}
+
+/// Record that the session `ticket` was given `key`'s address, so a later sign request
+/// may name it. `None` when that session has already ended; `Some(false)` when there was
+/// no memory to record it.
+pub(crate) fn host_share(ticket: u32, key: catcard_wallet::hostkeys::Shared) -> Option<bool> {
+    with_task(|t| t.chan.state_mut(ticket).map(|st| st.share(key))).flatten()
+}
+
+/// The wallet in force changed: what the open session was shown describes the old one,
+/// and so does what it was allowed.
 pub(crate) fn host_forget_wallet() {
     with_task(|t| {
         let id = t.chan.id();
         if let Some(st) = t.chan.state_mut(id) {
-            st.exposed.clear();
+            st.forget();
         }
         // And what a ckcc host was told the wallet is.
         t.ck.forget_identity();

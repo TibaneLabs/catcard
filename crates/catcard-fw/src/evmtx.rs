@@ -370,3 +370,179 @@ pub(crate) fn host_sign(
         Err(o) => o,
     }
 }
+
+/// Sign `text` for a computer asking over the encrypted channel (`crate::hostwallet`), as
+/// EIP-191 `personal_sign` by the key at `key`: the text, the address that signs and the
+/// path on the screen, and yes or no. The address and the 65 bytes `r || s || v`.
+///
+/// The text has already passed [`catcard_evm::personal::text`], so every byte of it is
+/// one the screen shows. It is laid out a line to a line, and a message this panel cannot
+/// hold whole is refused rather than shown cut: what is signed is what was read.
+///
+/// The signature is checked before it is handed back -- the key is recovered from it and
+/// compared with the one that signed -- as every signature made here is.
+// Its own frame, as `host_sign` is: the review's lines and view are the deepest part.
+#[inline(never)]
+pub(crate) fn host_sign_message(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    text: &str,
+    key: &catcard_wallet::hostkeys::KeyPath,
+    ticket: u32,
+) -> Result<
+    (
+        heapless::String<{ catcard_wallet::chain::address::MAX_LEN }>,
+        [u8; catcard_evm::personal::SIG_LEN],
+    ),
+    crate::hostwallet::Outcome,
+> {
+    use crate::hostwallet::Outcome;
+    use catcard_evm::personal;
+    use catcard_wallet::bip32::ChildNumber;
+    use catcard_wallet::chain::{self, Encoding, address as caddr};
+    use core::fmt::Write as _;
+    use outscript::crypto::secp256k1::{SecpPrivateKey, recover_public_key};
+    const HEAD: &str = "Sign message";
+
+    let refuse = |ui: &mut crate::ui::Ui<'_>, why: &'static str| {
+        crate::menu::message(ui.panel, HEAD, why, "any key to go back");
+        crate::menu::wait_for_any_key(ui);
+        Outcome::Refused(why)
+    };
+
+    let Some(master) = crate::menu::unlock_master(gate, login, ui, HEAD) else {
+        return Err(Outcome::Refused("the wallet could not be opened"));
+    };
+    // Only the leaf is kept past this point: the master is the whole wallet, and the
+    // review that follows can stand there for as long as nobody is in the room.
+    let leaf = {
+        let mut busy = crate::menu::Working::new(ui.panel, HEAD, "deriving");
+        let leaf = crate::keywork::run(|kw| {
+            let mut here = master.clone();
+            for &s in key.steps() {
+                here = here.derive_child(ChildNumber(s), kw).ok()?;
+            }
+            Some(here)
+        });
+        busy.tick(ui.panel);
+        leaf
+    };
+    drop(master);
+    let Some(leaf) = leaf else {
+        return Err(refuse(ui, "the key could not be derived"));
+    };
+    let public = crate::keywork::run(|kw| leaf.public_key(kw));
+
+    let mut addr = [0u8; caddr::MAX_LEN];
+    let Ok(n) = caddr::from_secp256k1(
+        &chain::ETHEREUM,
+        Encoding::Evm,
+        crate::prefs::network(),
+        &public,
+        &mut addr,
+    ) else {
+        drop(leaf);
+        return Err(refuse(ui, "address failed"));
+    };
+    let mut who: heapless::String<{ caddr::MAX_LEN }> = heapless::String::new();
+    let _ = who.push_str(core::str::from_utf8(&addr[..n]).unwrap_or(""));
+
+    let mut path: heapless::String<{ 1 + catcard_wallet::hostkeys::MAX_DEPTH * 12 }> =
+        heapless::String::new();
+    let _ = path.push('m');
+    for step in key.steps() {
+        const H: u32 = catcard_wallet::bip32::HARDENED_OFFSET;
+        let _ = write!(
+            path,
+            "/{}{}",
+            step & !H,
+            if step & H != 0 { "h" } else { "" }
+        );
+    }
+    match confirm_message(ui, HEAD, text, &who, &path) {
+        Ok(true) => {}
+        Ok(false) => {
+            drop(leaf);
+            return Err(Outcome::Declined);
+        }
+        Err(why) => {
+            drop(leaf);
+            return Err(refuse(ui, why));
+        }
+    }
+    if !crate::usbtask::host_alive(ticket) {
+        drop(leaf);
+        return Err(Outcome::Declined);
+    }
+
+    let mut busy = crate::menu::Working::new(ui.panel, HEAD, "signing");
+    let hash = crate::heap::take(personal::scratch_len(text.len()))
+        .and_then(|mut scratch| personal::digest(text.as_bytes(), scratch.bytes()));
+    let Some(hash) = hash else {
+        drop(leaf);
+        return Err(refuse(ui, "not enough memory"));
+    };
+    let sig = crate::keywork::run(|_kw| {
+        let k = SecpPrivateKey::from_bytes(leaf.secret_bytes()).ok()?;
+        Some(k.sign_recoverable(&hash))
+    });
+    drop(leaf);
+    busy.tick(ui.panel);
+    let Some((r, s, recid)) = sig else {
+        return Err(refuse(ui, "could not sign"));
+    };
+    // Check our own work, as a verifier would: recover the key and compare it with the
+    // one that signed. A signature that does not recover is worse than none.
+    match recover_public_key(&r, &s, recid, &hash) {
+        Ok(k) if k.serialize_compressed() == public => {}
+        _ => return Err(refuse(ui, "signature did not verify")),
+    }
+    let Some(out) = personal::signature(&r, &s, recid) else {
+        return Err(refuse(ui, "could not sign"));
+    };
+    crate::catlog!("evm: signed a {}-byte message for the computer", text.len());
+    Ok((who, out))
+}
+
+/// The message a line to a line, the address that will sign it, the path and how. `Ok`
+/// with the person's answer, or why the message cannot be put to them at all.
+#[inline(never)]
+fn confirm_message(
+    ui: &mut crate::ui::Ui<'_>,
+    head: &str,
+    text: &str,
+    address: &str,
+    path: &str,
+) -> Result<bool, &'static str> {
+    use catcard_evm::personal;
+    use catcard_ui::scroll::{Line, ScrollView};
+    let mut doc: heapless::Vec<Line, { personal::MAX_LINES + 5 }> = heapless::Vec::new();
+    let _ = doc.push(Line::title(head));
+    for line in text.split('\n') {
+        doc.push(Line::body(line).wrapped())
+            .map_err(|_| "message has too many lines")?;
+    }
+    let _ = doc.push(Line::body("will be signed by").small());
+    let _ = doc.push(Line::body(address).small().wrapped());
+    let _ = doc.push(Line::body(path).small().wrapped());
+    let _ = doc.push(Line::body("Ethereum, personal_sign").small().wrapped());
+    if !fits(&doc) {
+        return Err("too long to show here");
+    }
+    let mut view = ScrollView::build(
+        &doc,
+        crate::display::SCREEN_W,
+        crate::display::SCREEN_H,
+        crate::display::FONTS,
+    );
+    Ok(crate::menu::scroll_choice(ui, &mut view))
+}
+
+/// Whether every line of `doc` is in the view once wrapped. A view holds so many rows
+/// and stops; one that came out full may have stopped short, and the rows it dropped
+/// would be the end of the message and the address that signs it.
+#[inline(never)]
+fn fits(doc: &[catcard_ui::scroll::Line<'_>]) -> bool {
+    !catcard_ui::scroll::wrap(doc, crate::display::SCREEN_W, &crate::display::FONTS).is_full()
+}

@@ -35,6 +35,7 @@
 #![forbid(unsafe_code)]
 
 pub mod literal;
+pub mod personal;
 pub mod rlp;
 pub mod sign;
 pub mod summary;

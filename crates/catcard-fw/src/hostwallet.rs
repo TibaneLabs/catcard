@@ -1,4 +1,5 @@
-//! A computer asks for addresses, or for a signature; a person at the device decides.
+//! A computer asks for addresses, for one address by its path, or for a signature over a
+//! transaction or a message; a person at the device decides.
 //!
 //! The same shape as a USB firmware upgrade: the host asks, the device puts the question
 //! on its own screen, the person answers there, and the host polls for the outcome. The
@@ -22,11 +23,20 @@
 //! # What a session may reach
 //!
 //! Only inside the encrypted channel, and only what the person showed that session: a
-//! sign request's keys must each sit below an account path the person agreed to share, on
-//! the chain the request names ([`catcard_wallet::hostkeys`]). The list lives in the
-//! channel's per-session state, so a new handshake, a teardown, or a bus reset drops it.
+//! sign request's keys must each sit below an account path the person agreed to share, or
+//! be a key whose address was shared by its path, on the chain the request names
+//! ([`catcard_wallet::hostkeys`]). Both lists live in the channel's per-session state
+//! ([`SessionState`]), so a new handshake, a teardown, or a bus reset drops them.
 //! Whether a session may use any of this at all is one method,
 //! [`catcard_usb::ncry::Channel::host_wallet_allowed`].
+//!
+//! # The one thing a session can be given ahead of time
+//!
+//! Asked for an address by its path, the person may tick "Allow during session". From
+//! then until the session ends, the same session's requests for an address by path are
+//! answered without a question ([`SessionState::paths_allowed`]). That is all it covers:
+//! one public key and its address at a time, never an extended key, and never a
+//! signature -- every signature is still reviewed on this screen.
 //!
 //! Wire layouts: [`catcard_usb::hostwallet`] and `docs/USB.md` §"Host-wallet commands".
 
@@ -36,7 +46,7 @@ use catcard_callgate::Callgate;
 use catcard_usb::Status;
 use catcard_usb::hostwallet::{self as wire, busy, stage};
 use catcard_wallet::chain::{self, ChainId, Encoding};
-use catcard_wallet::hostkeys::{self, Exposed, KeyPath};
+use catcard_wallet::hostkeys::{self, Exposed, KeyPath, Shared};
 
 use crate::menu;
 use crate::ui::Ui;
@@ -45,11 +55,56 @@ use crate::ui::Ui;
 /// carries (21 today), with room.
 pub(crate) const MAX_EXPOSED: usize = 24;
 
+/// Keys one session can have been shown by path and still name in a sign request. The
+/// oldest is forgotten when one more arrives: a host that wants to sign with a key asks
+/// for its address first, and does not need the seventeenth one back.
+pub(crate) const MAX_SHARED: usize = 16;
+
 /// What the device keeps for one encrypted session, dropped with it.
 #[derive(Default)]
 pub(crate) struct SessionState {
     /// The accounts the person agreed to show this session, most recent approval only.
     pub exposed: heapless::Vec<Exposed, MAX_EXPOSED>,
+    /// The keys whose addresses were shared by path. On the heap, and only once there is
+    /// one: this struct sits in the USB task's static for the life of the device, and a
+    /// list most sessions never use is not worth its bytes of `.bss` there.
+    shared: Option<crate::heap::Leased<heapless::Vec<Shared, MAX_SHARED>>>,
+    /// The person ticked "Allow during session": an address asked for by its path is
+    /// shared without a question. Nothing else is allowed by it.
+    pub paths_allowed: bool,
+}
+
+impl SessionState {
+    /// The keys shared by path, oldest first.
+    pub(crate) fn shared(&self) -> &[Shared] {
+        self.shared.as_ref().map_or(&[], |v| &v[..])
+    }
+
+    /// Remember that `key`'s address was shared. False only when there is no memory for
+    /// the list, in which case nothing was recorded.
+    pub(crate) fn share(&mut self, key: Shared) -> bool {
+        if self.shared.is_none() {
+            self.shared = crate::heap::Leased::new(heapless::Vec::new()).ok();
+        }
+        let Some(list) = self.shared.as_mut() else {
+            return false;
+        };
+        if list.contains(&key) {
+            return true;
+        }
+        if list.is_full() {
+            list.remove(0);
+        }
+        list.push(key).is_ok()
+    }
+
+    /// The wallet in force changed: everything here described the old one, the
+    /// allowance included -- it was given for that wallet's addresses.
+    pub(crate) fn forget(&mut self) {
+        self.exposed.clear();
+        self.shared = None;
+        self.paths_allowed = false;
+    }
 }
 
 /// Largest sign upload the mk3 takes: the size of its signing buffers.
@@ -88,6 +143,51 @@ pub(crate) enum Ask {
         buf: HostBuf,
         len: usize,
     },
+    /// The one address at `path`, written as `encoding`.
+    AddressAt {
+        chain: ChainId,
+        encoding: Encoding,
+        path: KeyPath,
+        /// Put it on the screen to be compared, whatever the session is allowed.
+        show: bool,
+    },
+    /// `len` bytes of message at the start of `text`, to be signed by the key at `path`.
+    Message {
+        chain: ChainId,
+        how: MessageHow,
+        path: KeyPath,
+        text: crate::heap::Block,
+        len: usize,
+    },
+}
+
+/// How a message is signed: what the request's `format` and `scheme` came to.
+#[derive(Copy, Clone)]
+pub(crate) enum MessageHow {
+    /// One of the Bitcoin formats, as an address of `kind`.
+    Bitcoin {
+        kind: catcard_wallet::address::AddressKind,
+        format: crate::signmsg::Format,
+    },
+    /// EIP-191 `personal_sign`.
+    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    Evm,
+}
+
+impl MessageHow {
+    /// The wire's code for it ([`wire::scheme`]).
+    fn scheme(self) -> u8 {
+        use crate::signmsg::Format as F;
+        match self {
+            MessageHow::Bitcoin { format, .. } => match format {
+                F::Legacy => wire::scheme::BIP137,
+                F::Bip322 => wire::scheme::BIP322,
+                F::Bip322Full => wire::scheme::BIP322_FULL,
+            },
+            #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+            MessageHow::Evm => wire::scheme::EIP191,
+        }
+    }
 }
 
 /// A request handed to the UI task: the session it belongs to, and the question.
@@ -134,8 +234,12 @@ enum State {
 pub(crate) struct Cx<'a> {
     /// The id of the open session the request arrived on.
     pub session: u32,
-    /// What that session was shown.
+    /// The accounts that session was shown.
     pub exposed: &'a [Exposed],
+    /// The keys whose addresses it was given by path.
+    pub shared: &'a [Shared],
+    /// Whether it may have an address by its path without a question.
+    pub paths_allowed: bool,
     pub unlocked: bool,
     /// An upgrade is arriving, waiting for its answer, or approved.
     pub upgrade_busy: bool,
@@ -153,6 +257,70 @@ pub(crate) fn signs(chain: ChainId) -> bool {
         #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
         ChainId::Ethereum | ChainId::Solana => true,
         _ => false,
+    }
+}
+
+/// Whether this build signs messages for `chain`. Everything else is refused by name.
+pub(crate) fn signs_messages(chain: ChainId) -> bool {
+    match chain {
+        ChainId::Bitcoin => true,
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        ChainId::Ethereum => true,
+        _ => false,
+    }
+}
+
+/// What a message request's `format` and `scheme` come to on `chain`, or why they do not
+/// fit. The chain is one [`signs_messages`] said yes to.
+fn message_how(chain: ChainId, format: u8, scheme: u8) -> Result<MessageHow, &'static str> {
+    use crate::signmsg::Format as F;
+    use catcard_wallet::address::AddressKind as K;
+    match chain {
+        ChainId::Bitcoin => {
+            let kind = match format {
+                wire::format::P2PKH => K::P2pkh,
+                wire::format::P2SH_P2WPKH => K::P2shP2wpkh,
+                wire::format::P2WPKH => K::P2wpkh,
+                wire::format::P2TR => K::P2tr,
+                _ => return Err("not a Bitcoin address format"),
+            };
+            let format = match scheme {
+                wire::scheme::BIP137 => F::Legacy,
+                wire::scheme::BIP322 => F::Bip322,
+                wire::scheme::BIP322_FULL => F::Bip322Full,
+                _ => return Err("not a Bitcoin message scheme"),
+            };
+            if !crate::signmsg::allows(kind, format) {
+                return Err("that scheme does not fit that address type");
+            }
+            Ok(MessageHow::Bitcoin { kind, format })
+        }
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        ChainId::Ethereum => {
+            if format != wire::format::EVM {
+                return Err("not an EVM address format");
+            }
+            if scheme != wire::scheme::EIP191 {
+                return Err("not an EVM message scheme");
+            }
+            Ok(MessageHow::Evm)
+        }
+        _ => Err("this chain does not sign messages here"),
+    }
+}
+
+/// Why `message` cannot be signed under `how`, before any key is touched: not text the
+/// screen shows faithfully, or too long for the scheme.
+fn message_unshowable(how: MessageHow, message: &[u8]) -> Option<&'static str> {
+    match how {
+        MessageHow::Bitcoin { .. } => match core::str::from_utf8(message) {
+            Ok(text) => crate::signmsg::unshowable(text),
+            Err(_) => Some("plain ASCII only"),
+        },
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        MessageHow::Evm => catcard_evm::personal::text(message)
+            .err()
+            .map(catcard_evm::personal::Unshowable::why),
     }
 }
 
@@ -251,6 +419,9 @@ impl Desk {
             Op::HostSignCommit => self.commit(payload, out, cx),
             Op::HostResult => self.result(payload, out, cx),
             Op::HostAbort => self.abort(payload, out, cx),
+            Op::HostAddressAt => self.address_at(payload, out, cx),
+            Op::HostSignMessage => self.message(payload, out, cx),
+            Op::HostInfo => self.info(payload, out, cx),
             _ => (Status::UnknownOpcode, 0),
         }
     }
@@ -287,6 +458,142 @@ impl Desk {
         (Status::Ok, 0)
     }
 
+    fn address_at(&mut self, p: &[u8], out: &mut [u8], cx: &Cx<'_>) -> (Status, usize) {
+        let Ok(req) = wire::AddressAt::decode(p) else {
+            return (Status::BadRequest, 0);
+        };
+        if let Some(r) = self.refuse_new(out, cx, false) {
+            return r;
+        }
+        let c = match chain::resolve(u16::from(req.chain)) {
+            Ok(c) => c,
+            Err(chain::Unsupported::UnknownChain { .. }) => return refuse(out, "unknown chain"),
+            Err(chain::Unsupported::NotInThisBuild { id }) => {
+                return refuse_chain(out, id, "is not in this build");
+            }
+        };
+        // The chain's own list is the rule: a format it does not have is not written.
+        let Some(f) = c
+            .formats
+            .iter()
+            .find(|f| format_code(f.encoding) == req.format)
+        else {
+            return refuse_chain(out, c.id, "has no such address format");
+        };
+        let Some(path) = KeyPath::new(req.path.steps()) else {
+            return (Status::BadRequest, 0);
+        };
+        // SLIP-0010 derives hardened steps only.
+        if f.encoding == Encoding::Solana && !path.fully_hardened() {
+            return refuse(out, "a Solana key path must be hardened throughout");
+        }
+        crate::catlog!("host: one {} address asked for", c.name);
+        self.state = State::Queued {
+            owner: cx.session,
+            ask: Ask::AddressAt {
+                chain: c.id,
+                encoding: f.encoding,
+                path,
+                show: req.flags & wire::ask::SHOW != 0,
+            },
+        };
+        (Status::Ok, 0)
+    }
+
+    fn message(&mut self, p: &[u8], out: &mut [u8], cx: &Cx<'_>) -> (Status, usize) {
+        let Ok(req) = wire::SignMessage::decode(p) else {
+            return (Status::BadRequest, 0);
+        };
+        if let Some(r) = self.refuse_new(out, cx, false) {
+            return r;
+        }
+        let chain = match chain::resolve(u16::from(req.chain)) {
+            Ok(c) => c.id,
+            Err(chain::Unsupported::UnknownChain { .. }) => return refuse(out, "unknown chain"),
+            Err(chain::Unsupported::NotInThisBuild { id }) => {
+                return refuse_chain(out, id, "is not in this build");
+            }
+        };
+        if !signs_messages(chain) {
+            return refuse_chain(out, chain, "messages cannot be signed here");
+        }
+        // Everything that can be judged without a key is judged here, as for a
+        // transaction: a request that cannot be signed reaches nobody's screen.
+        let how = match message_how(chain, req.format, req.scheme) {
+            Ok(how) => how,
+            Err(why) => return refuse(out, why),
+        };
+        let Some(path) = KeyPath::new(req.path.steps()) else {
+            return (Status::BadRequest, 0);
+        };
+        if hostkeys::check(cx.exposed, cx.shared, chain, &[path]).is_err() {
+            return refuse(out, "the key was not shared this session");
+        }
+        if let Some(why) = message_unshowable(how, req.message) {
+            return refuse(out, why);
+        }
+        let len = req.message.len();
+        let Some(mut text) = crate::heap::take(len) else {
+            return refuse(out, "not enough memory now");
+        };
+        text.bytes()[..len].copy_from_slice(req.message);
+        crate::catlog!(
+            "host: {} message of {} bytes queued",
+            chain_name(chain),
+            len
+        );
+        self.state = State::Queued {
+            owner: cx.session,
+            ask: Ask::Message {
+                chain,
+                how,
+                path,
+                text,
+                len,
+            },
+        };
+        (Status::Ok, 0)
+    }
+
+    /// `HostInfo`: what this build answers and what the session has, and nothing of the
+    /// wallet's. Answered whatever else is in hand, and while locked.
+    fn info(&mut self, p: &[u8], out: &mut [u8], cx: &Cx<'_>) -> (Status, usize) {
+        if wire::decode_empty(p).is_err() {
+            return (Status::BadRequest, 0);
+        }
+        let mut session = 0;
+        if cx.paths_allowed {
+            session |= wire::session::PATHS_ALLOWED;
+        }
+        if !cx.exposed.is_empty() || !cx.shared.is_empty() {
+            session |= wire::session::SHARED;
+        }
+        let features = wire::feature::ADDRESS_AT | wire::feature::SIGN_MESSAGE;
+        let Ok(mut w) = wire::InfoWriter::new(out, features, session) else {
+            return (Status::BadRequest, 0);
+        };
+        for c in chain::SUPPORTED {
+            let mut can = wire::can::ADDRESSES;
+            if signs(c.id) {
+                can |= wire::can::SIGN;
+            }
+            if signs_messages(c.id) {
+                can |= wire::can::MESSAGES;
+            }
+            let formats: heapless::Vec<u8, 8> = c
+                .formats
+                .iter()
+                .take(8)
+                .map(|f| format_code(f.encoding))
+                .collect();
+            // A reply that ran out of room says what fitted; the count is what was written.
+            if w.push(c.id.as_u16() as u8, can, &formats).is_err() {
+                break;
+            }
+        }
+        (Status::Ok, w.finish())
+    }
+
     fn begin(&mut self, p: &[u8], out: &mut [u8], cx: &Cx<'_>) -> (Status, usize) {
         let Ok(b) = wire::SignBegin::decode(p) else {
             return (Status::BadRequest, 0);
@@ -308,7 +615,9 @@ impl Desk {
         }
         // Nothing shown on this chain means no key could pass: say so before the upload
         // rather than after it.
-        if !cx.exposed.iter().any(|e| e.chain == chain) {
+        if !cx.exposed.iter().any(|e| e.chain == chain)
+            && !cx.shared.iter().any(|s| s.chain == chain)
+        {
             return refuse_chain(out, chain, "was not shared this session");
         }
         let total = b.length as usize;
@@ -386,7 +695,7 @@ impl Desk {
         // Everything that can be judged without a key is judged here, so a request that
         // cannot be signed never reaches anybody's screen. From here on any refusal
         // drops the upload with it.
-        let verdict = check_blob(&buf.bytes()[..total], chain, cx.exposed);
+        let verdict = check_blob(&buf.bytes()[..total], chain, cx.exposed, cx.shared);
         if let Err(why) = verdict {
             crate::catlog!("host: sign request refused: {}", why);
             return refuse(out, why);
@@ -530,17 +839,22 @@ pub(crate) fn result_len(lease: usize) -> usize {
 }
 
 /// Check a whole sign blob against its chain and what this session was shown.
-fn check_blob(bytes: &[u8], chain: ChainId, exposed: &[Exposed]) -> Result<(), &'static str> {
+fn check_blob(
+    bytes: &[u8],
+    chain: ChainId,
+    exposed: &[Exposed],
+    shared: &[Shared],
+) -> Result<(), &'static str> {
     let blob = wire::SignBlob::decode(bytes).map_err(|_| "malformed sign request")?;
     if u16::from(blob.chain) != chain.as_u16() {
         return Err("chain differs from the one announced");
     }
     let keys = keys_of(&blob)?;
-    match hostkeys::check(exposed, chain, &keys) {
+    match hostkeys::check(exposed, shared, chain, &keys) {
         Ok(()) => {}
         Err(hostkeys::Refused::NoKeys) => return Err("no key listed"),
         Err(hostkeys::Refused::NotExposed { .. }) => {
-            return Err("a key is not under an account shared this session");
+            return Err("a key was not shared this session");
         }
     }
     match chain {
@@ -720,9 +1034,28 @@ pub(crate) fn serve(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
         return;
     };
     let ticket = t.ticket;
-    let outcome = match t.ask {
-        Ask::Addresses => addresses(gate, login, ui, ticket),
-        Ask::Sign { chain, buf, len } => sign(gate, login, ui, ticket, chain, buf, len),
+    // `quiet`: the answer was one the session had been allowed ahead of time, so nobody
+    // was asked and nobody is told -- a screen waiting for a key here would hold up the
+    // next such request behind a keypress the allowance was given to spare.
+    let (outcome, quiet) = match t.ask {
+        Ask::Addresses => (addresses(gate, login, ui, ticket), false),
+        Ask::Sign { chain, buf, len } => (sign(gate, login, ui, ticket, chain, buf, len), false),
+        Ask::AddressAt {
+            chain,
+            encoding,
+            path,
+            show,
+        } => address_at(gate, login, ui, ticket, chain, encoding, &path, show),
+        Ask::Message {
+            chain,
+            how,
+            path,
+            text,
+            len,
+        } => (
+            message(gate, login, ui, ticket, chain, how, &path, text, len),
+            false,
+        ),
     };
     let sent = matches!(outcome, Outcome::Ready { .. });
     let refused = match &outcome {
@@ -733,6 +1066,9 @@ pub(crate) fn serve(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     // Handed back before the last screen, so the host is not kept waiting on a keypress.
     crate::usbtask::host_finish(ticket, outcome);
     let note = take_note();
+    if quiet && sent && alive {
+        return;
+    }
     if !alive {
         menu::message(ui.panel, "Computer gone", "nothing was sent", "");
     } else if sent {
@@ -1053,4 +1389,351 @@ fn sign(
             Outcome::Refused("this chain does not sign here")
         }
     }
+}
+
+// ---- one address, by its path ----------------------------------------------------------
+
+/// Room for a path as text: `m`, then up to eight steps of ten digits, a slash and an `h`.
+const PATH_TEXT: usize = 1 + hostkeys::MAX_DEPTH * 12;
+
+/// A path as a person reads it: `m/84h/0h/0h/0/3`.
+fn path_text(path: &KeyPath) -> heapless::String<PATH_TEXT> {
+    const H: u32 = catcard_wallet::bip32::HARDENED_OFFSET;
+    let mut s = heapless::String::new();
+    let _ = s.push('m');
+    for step in path.steps() {
+        let _ = write!(s, "/{}{}", step & !H, if step & H != 0 { "h" } else { "" });
+    }
+    s
+}
+
+/// What one of `chain`'s formats is called on a screen.
+fn format_label(c: &chain::Chain, encoding: Encoding) -> &'static str {
+    c.formats
+        .iter()
+        .find(|f| f.encoding == encoding)
+        .map_or("", |f| f.label)
+}
+
+/// The answer to `HostAddressAt`, and whether it was given without anybody being asked.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn address_at(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    ticket: u32,
+    chain: ChainId,
+    encoding: Encoding,
+    path: &KeyPath,
+    show: bool,
+) -> (Outcome, bool) {
+    use catcard_ui::scroll::Line;
+    let Ok(c) = chain::resolve(chain.as_u16()) else {
+        return (Outcome::Refused("this chain is not in this build"), false);
+    };
+    let shown = path_text(path);
+    let allowed = crate::usbtask::host_paths_allowed(ticket);
+    if !allowed {
+        // The question: which chain, which kind of address, which key. Read to its end
+        // before it can be answered.
+        let mut what: heapless::String<48> = heapless::String::new();
+        let _ = write!(what, "{} address at", c.name);
+        let lines = [
+            Line::title("Computer asks"),
+            Line::body("for the").small(),
+            Line::body(&what).wrapped(),
+            Line::body(&shown).wrapped(),
+            Line::body(format_label(c, encoding)).small().wrapped(),
+        ];
+        if !asked(ui, &lines) || !alive(ticket) {
+            return (Outcome::Declined, false);
+        }
+        // Then how far the yes goes. The cursor starts on "Share it": the box is an extra,
+        // and one OK must never tick it.
+        let mut rows = [menu::Toggle {
+            line: Line::item("Allow during session", 0),
+            on: false,
+        }];
+        if menu::toggle_list_from(ui, "Share address", "", &mut rows, "Share it", true).is_none()
+            || !alive(ticket)
+        {
+            return (Outcome::Declined, false);
+        }
+        if rows[0].on {
+            if !crate::usbtask::host_allow_paths(ticket) {
+                return (Outcome::Declined, false);
+            }
+            crate::catlog!("host: addresses by path allowed for this session");
+        }
+    }
+
+    let derived = match derive_at(gate, login, ui, c, encoding, path) {
+        Ok(d) => d,
+        Err(why) => return (Outcome::Refused(why), false),
+    };
+    let address = core::str::from_utf8(&derived.address[..derived.address_len]).unwrap_or("?");
+    if show {
+        // On the screen to be compared with the computer's, allowance or not: this is the
+        // one request whose point is that a person looks.
+        let lines = [
+            Line::title("Address"),
+            Line::body(address).wrapped(),
+            Line::body(&shown).small().wrapped(),
+            Line::body("Same as the computer shows?").small().wrapped(),
+        ];
+        if !asked(ui, &lines) || !alive(ticket) {
+            return (Outcome::Declined, false);
+        }
+    }
+
+    // What was shared is what may sign later -- recorded before the host can have it.
+    let key = Shared { chain, key: *path };
+    match crate::usbtask::host_share(ticket, key) {
+        Some(true) => {}
+        Some(false) => return (Outcome::Refused("not enough memory"), false),
+        None => return (Outcome::Declined, false),
+    }
+    let Some(wpath) = wire::Path::new(path.steps()) else {
+        return (Outcome::Refused("bad path"), false);
+    };
+    let reply = wire::AddressReply {
+        fingerprint: derived.fingerprint,
+        chain: chain.as_u16() as u8,
+        format: format_code(encoding),
+        path: wpath,
+        address: &derived.address[..derived.address_len],
+        pubkey: &derived.pubkey[..derived.pubkey_len],
+    };
+    const ROOM: usize = 8 + (1 + 4 * hostkeys::MAX_DEPTH) + 1 + caddr_max() + 1 + 33;
+    let Some(mut block) = crate::heap::take(ROOM) else {
+        return (Outcome::Refused("not enough memory"), false);
+    };
+    let Ok(len) = reply.encode(block.bytes()) else {
+        return (Outcome::Refused("could not write the address"), false);
+    };
+    crate::catlog!("host: one {} address shared", c.name);
+    set_note(c.name);
+    (
+        Outcome::Ready {
+            buf: HostBuf::Heap(block),
+            off: 0,
+            len,
+        },
+        allowed && !show,
+    )
+}
+
+/// Longest address any chain here writes.
+const fn caddr_max() -> usize {
+    catcard_wallet::chain::address::MAX_LEN
+}
+
+/// A document the person answers: OK at its end is yes, cancel is no.
+#[inline(never)]
+fn asked(ui: &mut Ui<'_>, lines: &[catcard_ui::scroll::Line<'_>]) -> bool {
+    use catcard_ui::scroll::ScrollView;
+    let mut view = ScrollView::build(
+        lines,
+        crate::display::SCREEN_W,
+        crate::display::SCREEN_H,
+        crate::display::FONTS,
+    );
+    menu::scroll_choice(ui, &mut view)
+}
+
+/// One key's public half, its address, and the wallet it belongs to.
+struct Derived {
+    fingerprint: [u8; 4],
+    address: [u8; caddr_max()],
+    address_len: usize,
+    pubkey: [u8; 33],
+    pubkey_len: usize,
+}
+
+/// Derive the key at `path` and write its address as `encoding`. Only the public key
+/// leaves the masked regions.
+#[inline(never)]
+fn derive_at(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    c: &'static chain::Chain,
+    encoding: Encoding,
+    path: &KeyPath,
+) -> Result<Derived, &'static str> {
+    use catcard_wallet::bip32::ChildNumber;
+    use catcard_wallet::chain::address as caddr;
+    const HEAD: &str = "Address";
+
+    let Some(master) = menu::unlock_master(gate, login, ui, HEAD) else {
+        return Err("the wallet could not be opened");
+    };
+    let mut d = Derived {
+        fingerprint: crate::keywork::run(|kw| master.fingerprint(kw)),
+        address: [0; caddr_max()],
+        address_len: 0,
+        pubkey: [0; 33],
+        pubkey_len: 0,
+    };
+    if encoding != Encoding::Solana {
+        let mut steps: heapless::Vec<ChildNumber, { hostkeys::MAX_DEPTH }> = heapless::Vec::new();
+        for s in path.steps() {
+            let _ = steps.push(ChildNumber(*s));
+        }
+        let key = {
+            let mut busy = menu::Working::new(ui.panel, HEAD, "deriving");
+            menu::public_at(&master, &steps, &mut busy, ui.panel).ok_or("derivation failed")?
+        };
+        drop(master);
+        d.address_len = caddr::from_secp256k1(
+            c,
+            encoding,
+            crate::prefs::network(),
+            &key.public_key,
+            &mut d.address,
+        )
+        .map_err(|_| "could not write an address")?;
+        d.pubkey = key.public_key;
+        d.pubkey_len = 33;
+        return Ok(d);
+    }
+    drop(master);
+
+    // Solana: SLIP-0010 from the seed, not from the master (and hardened all the way,
+    // which the USB task checked).
+    #[cfg(feature = "multichain")]
+    {
+        const H: u32 = catcard_wallet::bip32::HARDENED_OFFSET;
+        let mut steps: heapless::Vec<u32, { hostkeys::MAX_DEPTH }> = heapless::Vec::new();
+        for s in path.steps() {
+            let _ = steps.push(s & !H);
+        }
+        let key = menu::with_seed(gate, login, ui.panel, HEAD, |seed, kw| {
+            catcard_wallet::slip10::derive(seed, &steps, kw).map(|n| n.public_key(kw))
+        })?;
+        d.address_len = caddr::from_ed25519(c, &key, &mut d.address)
+            .map_err(|_| "could not write an address")?;
+        d.pubkey[..32].copy_from_slice(&key);
+        d.pubkey_len = 32;
+        Ok(d)
+    }
+    #[cfg(not(feature = "multichain"))]
+    {
+        let _ = (c, d);
+        Err("this chain is not in this build")
+    }
+}
+
+// ---- messages -------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn message(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    ticket: u32,
+    chain: ChainId,
+    how: MessageHow,
+    path: &KeyPath,
+    mut text: crate::heap::Block,
+    len: usize,
+) -> Outcome {
+    // Read again for use: the USB task checked it, and this is where it is acted on.
+    let bytes = &text.bytes()[..len];
+    if let Some(why) = message_unshowable(how, bytes) {
+        return Outcome::Refused(why);
+    }
+    let Ok(body) = core::str::from_utf8(bytes) else {
+        return Outcome::Refused("plain ASCII only");
+    };
+
+    let mut b: heapless::String<24> = heapless::String::new();
+    let _ = write!(b, "{} message", chain_name(chain));
+    menu::ask(ui.panel, "Computer asks", "you to sign a", &b);
+    if !menu::confirmed(ui) || !alive(ticket) {
+        return Outcome::Declined;
+    }
+
+    // The scheme's own review -- the text, the address that signs, the path, and how --
+    // and its own check of the signature before anything is handed back.
+    let done: Result<Outcome, Outcome> = match how {
+        MessageHow::Bitcoin { kind, format } => {
+            bitcoin_message(gate, login, ui, how, path, body, kind, format)
+        }
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        MessageHow::Evm => crate::evmtx::host_sign_message(gate, login, ui, body, path, ticket)
+            .and_then(|(address, sig)| message_result(chain, how, path, address.as_bytes(), &sig)),
+    };
+    let outcome = match done {
+        Ok(o) | Err(o) => o,
+    };
+    if matches!(outcome, Outcome::Ready { .. }) {
+        if !alive(ticket) {
+            return Outcome::Declined;
+        }
+        crate::catlog!("host: {} message signed", chain_name(chain));
+        set_note("signed message");
+    }
+    outcome
+}
+
+/// A Bitcoin message, through the screens and the self-check `crate::signmsg` has.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn bitcoin_message(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    how: MessageHow,
+    path: &KeyPath,
+    body: &str,
+    kind: catcard_wallet::address::AddressKind,
+    format: crate::signmsg::Format,
+) -> Result<Outcome, Outcome> {
+    use catcard_wallet::bip32::{ChildNumber, DerivationPath};
+    let mut steps: heapless::Vec<ChildNumber, { hostkeys::MAX_DEPTH }> = heapless::Vec::new();
+    for s in path.steps() {
+        let _ = steps.push(ChildNumber(*s));
+    }
+    let dpath = DerivationPath::from_slice(&steps).map_err(|_| Outcome::Refused("bad path"))?;
+    // `None` is the person saying no, or a failure the screen has already explained.
+    let signed = crate::signmsg::sign_for_computer(gate, login, ui, body, kind, dpath, format)
+        .ok_or(Outcome::Declined)?;
+    message_result(
+        ChainId::Bitcoin,
+        how,
+        path,
+        signed.address.as_bytes(),
+        signed.armoured.as_bytes(),
+    )
+}
+
+/// The message result, in a heap block of its own.
+fn message_result(
+    chain: ChainId,
+    how: MessageHow,
+    path: &KeyPath,
+    address: &[u8],
+    signature: &[u8],
+) -> Result<Outcome, Outcome> {
+    let wpath = wire::Path::new(path.steps()).ok_or(Outcome::Refused("bad path"))?;
+    let reply = wire::MessageReply {
+        chain: chain.as_u16() as u8,
+        scheme: how.scheme(),
+        path: wpath,
+        address,
+        signature,
+    };
+    let room = wire::MessageReply::max_len(address.len(), signature.len());
+    let mut block = crate::heap::take(room).ok_or(Outcome::Refused("not enough memory"))?;
+    let len = reply
+        .encode(block.bytes())
+        .map_err(|_| Outcome::Refused("result too large"))?;
+    Ok(Outcome::Ready {
+        buf: HostBuf::Heap(block),
+        off: 0,
+        len,
+    })
 }

@@ -1,16 +1,22 @@
 //! Which keys a computer may ask this device to sign with.
 //!
 //! A host that wants signatures over USB first asks for addresses, and the person at the
-//! device chooses an account and which chains to show. What was shown is the whole of
-//! what a later sign request may reach: each key the request lists has to sit **below**
-//! an account-level path (`m/purpose'/coin'/account'`) that was shown, on the chain the
-//! request names. A key anywhere else -- another account, another purpose, another
-//! chain's coin type, the account node itself -- is refused before anything reaches the
-//! screen.
+//! device decides what to show. What was shown is the whole of what a later sign request
+//! may reach, and there are two ways a key gets there:
+//!
+//! - **under an account**: the person chose an account and which chains to show, and the
+//!   key sits **below** an account-level path (`m/purpose'/coin'/account'`) that was
+//!   shown, on the chain the request names;
+//! - **by its own path**: the host asked for the address at exactly that path on that
+//!   chain, and it was shared ([`Shared`]).
+//!
+//! A key anywhere else -- another account, another purpose, another chain's coin type,
+//! the account node itself, the sibling of a key shared by path -- is refused before
+//! anything reaches the screen.
 //!
 //! This is the pure half of that rule: which account paths a chain exposes, where its
-//! first address sits, and whether a path is under an exposed account. The firmware keeps
-//! the list for the life of one encrypted session and forgets it when the session ends.
+//! first address sits, and whether a path was shown. The firmware keeps both lists for the
+//! life of one encrypted session and forgets them when the session ends.
 
 use crate::bip32::{HARDENED_OFFSET, Network};
 use crate::chain::{Chain, ChainId, Encoding, Format};
@@ -63,6 +69,15 @@ pub struct Exposed {
     pub account: [u32; ACCOUNT_DEPTH],
 }
 
+/// One key whose address the session was given by its path: the chain, and the path.
+///
+/// Exactly that key and nothing near it: a sibling index or a child was not shown.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Shared {
+    pub chain: ChainId,
+    pub key: KeyPath,
+}
+
 /// Whether `path` is strictly below `account`: it starts with every step of `account` and
 /// goes at least one level further.
 ///
@@ -77,23 +92,31 @@ pub fn is_under(path: &[u32], account: &[u32]) -> bool {
 pub enum Refused {
     /// No key listed.
     NoKeys,
-    /// Key `index` is not under any account this session showed on `chain`.
+    /// Key `index` is neither under an account this session showed on `chain` nor a
+    /// key it was shown by path there.
     NotExposed { index: usize },
 }
 
-/// Check every key a sign request lists against what was exposed, for `chain`.
+/// Check every key a sign request lists against what the session was shown, for `chain`:
+/// the accounts in `exposed`, and the single keys in `shared`.
 ///
-/// An exposure on another chain does not count, even at the same path: a Tron account and
-/// an Ethereum one can share a derivation shape, and a request naming one must not reach
-/// the other's approval.
-pub fn check(exposed: &[Exposed], chain: ChainId, keys: &[KeyPath]) -> Result<(), Refused> {
+/// Something shown on another chain does not count, even at the same path: a Tron account
+/// and an Ethereum one can share a derivation shape, and a request naming one must not
+/// reach the other's approval.
+pub fn check(
+    exposed: &[Exposed],
+    shared: &[Shared],
+    chain: ChainId,
+    keys: &[KeyPath],
+) -> Result<(), Refused> {
     if keys.is_empty() {
         return Err(Refused::NoKeys);
     }
     for (index, key) in keys.iter().enumerate() {
         let ok = exposed
             .iter()
-            .any(|e| e.chain == chain && is_under(key.steps(), &e.account));
+            .any(|e| e.chain == chain && is_under(key.steps(), &e.account))
+            || shared.iter().any(|s| s.chain == chain && s.key == *key);
         if !ok {
             return Err(Refused::NotExposed { index });
         }
@@ -181,7 +204,7 @@ mod tests {
     fn a_key_under_a_shown_account_passes() {
         let shown = [btc(84, 0), btc(86, 0)];
         let keys = [key(&[84 | H, H, H, 0, 3]), key(&[86 | H, H, H, 1, 0])];
-        assert_eq!(check(&shown, ChainId::Bitcoin, &keys), Ok(()));
+        assert_eq!(check(&shown, &[], ChainId::Bitcoin, &keys), Ok(()));
     }
 
     #[test]
@@ -189,7 +212,7 @@ mod tests {
         let shown = [btc(84, 0)];
         let keys = [key(&[84 | H, H, H, 0, 3]), key(&[84 | H, H, 1 | H, 0, 0])];
         assert_eq!(
-            check(&shown, ChainId::Bitcoin, &keys),
+            check(&shown, &[], ChainId::Bitcoin, &keys),
             Err(Refused::NotExposed { index: 1 })
         );
     }
@@ -197,11 +220,11 @@ mod tests {
     #[test]
     fn nothing_shown_means_nothing_signs() {
         assert_eq!(
-            check(&[], ChainId::Bitcoin, &[key(&[84 | H, H, H, 0, 0])]),
+            check(&[], &[], ChainId::Bitcoin, &[key(&[84 | H, H, H, 0, 0])]),
             Err(Refused::NotExposed { index: 0 })
         );
         assert_eq!(
-            check(&[btc(84, 0)], ChainId::Bitcoin, &[]),
+            check(&[btc(84, 0)], &[], ChainId::Bitcoin, &[]),
             Err(Refused::NoKeys)
         );
     }
@@ -216,10 +239,54 @@ mod tests {
         assert_eq!(
             check(
                 &shown,
+                &[],
                 ChainId::Ethereum,
                 &[key(&[44 | H, 60 | H, H, 0, 0])]
             ),
             Err(Refused::NotExposed { index: 0 })
+        );
+    }
+
+    #[test]
+    fn a_key_shared_by_path_passes_and_nothing_beside_it_does() {
+        let shared = [Shared {
+            chain: ChainId::Bitcoin,
+            key: key(&[48 | H, H, H, 2 | H, 0, 7]),
+        }];
+        let ok = |steps: &[u32]| check(&[], &shared, ChainId::Bitcoin, &[key(steps)]);
+        assert_eq!(ok(&[48 | H, H, H, 2 | H, 0, 7]), Ok(()));
+        // Not its sibling, its parent, its child, nor its unhardened twin.
+        let no = Err(Refused::NotExposed { index: 0 });
+        assert_eq!(ok(&[48 | H, H, H, 2 | H, 0, 8]), no);
+        assert_eq!(ok(&[48 | H, H, H, 2 | H, 0]), no);
+        assert_eq!(ok(&[48 | H, H, H, 2 | H, 0, 7, 0]), no);
+        assert_eq!(ok(&[48 | H, H, H, 2, 0, 7]), no);
+        // Nor the same path on another chain.
+        assert_eq!(
+            check(
+                &[],
+                &shared,
+                ChainId::Ethereum,
+                &[key(&[48 | H, H, H, 2 | H, 0, 7])]
+            ),
+            no
+        );
+    }
+
+    #[test]
+    fn accounts_and_single_keys_are_checked_together() {
+        let shown = [btc(84, 0)];
+        let shared = [Shared {
+            chain: ChainId::Bitcoin,
+            key: key(&[86 | H, H, 3 | H, 0, 1]),
+        }];
+        let keys = [key(&[84 | H, H, H, 1, 9]), key(&[86 | H, H, 3 | H, 0, 1])];
+        assert_eq!(check(&shown, &shared, ChainId::Bitcoin, &keys), Ok(()));
+        // One key outside both is named by its position.
+        let keys = [key(&[84 | H, H, H, 1, 9]), key(&[86 | H, H, 3 | H, 0, 2])];
+        assert_eq!(
+            check(&shown, &shared, ChainId::Bitcoin, &keys),
+            Err(Refused::NotExposed { index: 1 })
         );
     }
 

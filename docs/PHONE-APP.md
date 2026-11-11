@@ -252,8 +252,42 @@ chain) and the first receive address as a check; derive the rest yourself. `shap
 an account chain with its one address.
 
 **The device remembers which account paths it showed this session.** A later signing
-request may only name keys under those paths; a key under an account that was never
-shared is refused. Ask for addresses first, every session.
+request may only name keys under those paths, or keys whose address it gave you by path
+(§5a); a key that was never shared either way is refused. Ask first, every session.
+
+## 5a. One address by its path, and what the build can do
+
+`HostInfo` (`0x0058`, empty) asks nobody anything:
+
+```text
+[u8 version = 1][u8 features][u8 session][u16 longest message][u8 count]
+count × [u8 chain][u8 can][u8 n][n × u8 format]
+```
+
+`UnknownOpcode` means older firmware: §5 and §6 are all it has. Otherwise `features`
+bit 0 is `HostAddressAt` and bit 1 `HostSignMessage`; per chain, `can` bit 0 is
+addresses, bit 1 transaction signing, bit 2 message signing, followed by the address
+formats the chain has. Use it to decide what to offer, rather than finding out by
+refusal. `session` bit 0 says the person has ticked "Allow during session" (below).
+
+`HostAddressAt` (`0x0056`): `[u8 chain][u8 format][u8 flags][path]`. The person sees the
+chain and the path and chooses "Share it" -- optionally ticking **Allow during session**
+first, after which every later `HostAddressAt` on this session is answered without a
+question (still poll for it: the device derives on its own time). The result:
+
+```text
+[u8 kind = 5][u8 version = 1][4 master fingerprint][u8 chain][u8 format]
+[path]
+[u8 len][address, ASCII]
+[u8 len][public key]
+```
+
+Set `flags` bit 0 to have the device show the address and ask "Same as the computer
+shows?" -- do this for an address the person is about to receive to, and show the same
+address on the phone while they compare. Leave the other bits zero.
+
+The allowance covers addresses by path and nothing else: it ends with the session, and
+`HostAddresses` and every signature are still asked for.
 
 ## 6. Signing
 
@@ -261,7 +295,8 @@ Build the **sign blob**:
 
 ```text
 [u8 version = 1][u8 chain][u8 key count 1..32]
-key count × [path]        the signing keys, each strictly below a shared account path
+key count × [path]        the signing keys, each below a shared account path or
+                          itself shared by path (§5a)
 [u32 tx length][tx bytes] nothing after it
 ```
 
@@ -297,6 +332,34 @@ the device could finalise; otherwise take the PSBT and finalise or pass it on yo
 Only the keys you listed sign; an input the wallet could have signed with an unlisted key
 is left unsigned, and the review tells the person so.
 
+## 6a. Signing a message
+
+One request, `HostSignMessage` (`0x0057`):
+
+```text
+[u8 version = 1][u8 chain][u8 format][u8 scheme][path][u16 length][message]
+```
+
+`scheme`: 1 BIP-137 legacy, 2 BIP-322 simple, 3 BIP-322 full (all Bitcoin; `format` is
+the address type the signature speaks for), 4 EIP-191 `personal_sign` (Ethereum,
+`format` 5). The key must have been shared this session. Bitcoin messages are one line
+of printable ASCII up to 240 characters; EIP-191 messages are printable ASCII in up to
+24 lines and 960 bytes, with no line starting or ending in a space. Anything else is
+`Refused` with the reason as text -- as is a message too long for that device's screen,
+which you learn only from the result, since it depends on the board.
+
+The person reads the message on the device, with the signing address, and approves. The
+result:
+
+```text
+[u8 kind = 6][u8 version = 1][u8 chain][u8 scheme][path]
+[u8 len][address, ASCII][u16 len][signature]
+```
+
+The signature is base64 text for the Bitcoin schemes (what a verifier pastes) and the 65
+bytes `r || s || v` for EIP-191 (hex-encode with `0x` for a web3 caller). There is no
+EIP-712 and no Solana or Tron message signing; `HostInfo` says so per chain.
+
 ## 7. Polling for the answer
 
 `HostResult` (`0x0054`) with `[u32 offset]`, inside the channel:
@@ -321,11 +384,14 @@ you will not fetch; `HostAbort` cannot withdraw one once it is on the screen.
 slot appears → beginSession → Identify
   not UNLOCKED → "unlock your CatCard", retry Identify
 PairCommit → PairReveal → show code → person taps same → PairConfirm until inner Ok
+HostInfo → what to offer
 HostAddresses → poll HostResult → show accounts
+  or: HostAddressAt → poll HostResult → one address (tick "Allow during session" once)
 ...
 build blob → HostSignBegin → HostSignData × n → HostSignCommit → poll HostResult
   Declined / Refused → tell the person
   Ok → broadcast
+HostSignMessage → poll HostResult → signature
 ```
 
 Ending: `PairAbort` is polite but optional; unplugging, a bus reset or the device's

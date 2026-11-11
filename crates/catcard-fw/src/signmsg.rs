@@ -136,6 +136,11 @@ fn formats_for(kind: AddressKind) -> &'static [Format] {
     }
 }
 
+/// Whether an address of `kind` can be signed for in `format`.
+pub(crate) fn allows(kind: AddressKind, format: Format) -> bool {
+    formats_for(kind).contains(&format)
+}
+
 /// Which key signs, and how: an address type, the path to it, and the format.
 #[derive(Clone)]
 struct Choice {
@@ -513,6 +518,25 @@ pub(crate) fn sign_for_host(
     Some((signed.address, sig))
 }
 
+/// Sign `text` for a computer asking over the encrypted channel (`crate::hostwallet`): by
+/// the key at `path`, as an address of `kind`, in `format` -- all three the computer's
+/// choice, and all three on the screen with the text before anything is signed. The same
+/// confirmation and the same self-check as a message typed here.
+///
+/// `None` when the person declined or it could not be done, which the screen has said.
+pub(crate) fn sign_for_computer(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    text: &str,
+    kind: AddressKind,
+    path: DerivationPath,
+    format: Format,
+) -> Option<Signed> {
+    let choice = Choice { kind, path, format };
+    sign_with_key(gate, login, ui, "Sign message", text, &choice, true)
+}
+
 /// Sign `text` -- a bare message, or the three-line request form -- and hand back the
 /// armoured file instead of writing it anywhere, for a caller with its own way out: the
 /// NFC tag today, which puts the file back where the message came from.
@@ -552,7 +576,6 @@ pub(crate) fn sign_to_file(
 /// Why `text` cannot be shown as a message to sign, before any key is touched: empty,
 /// too long, or holding a character the screen cannot show faithfully -- the owner would
 /// be signing something other than what they read.
-#[cfg_attr(feature = "board-mk3", allow(dead_code))]
 pub(crate) fn unshowable(text: &str) -> Option<&'static str> {
     if text.is_empty() {
         return Some("nothing to sign in that");

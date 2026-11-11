@@ -289,6 +289,9 @@ fn opcodes_round_trip_and_unknown_ones_stay_unknown() {
         Opcode::HostSignCommit,
         Opcode::HostResult,
         Opcode::HostAbort,
+        Opcode::HostAddressAt,
+        Opcode::HostSignMessage,
+        Opcode::HostInfo,
         Opcode::RngSample,
         Opcode::RngHealth,
         Opcode::DebugTrng,
@@ -298,6 +301,9 @@ fn opcodes_round_trip_and_unknown_ones_stay_unknown() {
     // The host-wallet opcodes are the published numbers.
     assert_eq!(Opcode::HostAddresses as u16, 0x0050);
     assert_eq!(Opcode::HostAbort as u16, 0x0055);
+    assert_eq!(Opcode::HostAddressAt as u16, 0x0056);
+    assert_eq!(Opcode::HostSignMessage as u16, 0x0057);
+    assert_eq!(Opcode::HostInfo as u16, 0x0058);
     // So are the paired RNG ones.
     assert_eq!(Opcode::RngSample as u16, 0x0060);
     assert_eq!(Opcode::RngHealth as u16, 0x0061);

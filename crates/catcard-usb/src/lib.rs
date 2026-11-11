@@ -278,6 +278,24 @@ pub enum Opcode {
     /// Drop an upload that was not committed, or a result nobody will fetch. Cannot
     /// withdraw a request already waiting for the person. Only inside the channel.
     HostAbort = 0x0055,
+    /// Ask for the one address at a path: `[u8 chain][u8 format][u8 flags][path]`
+    /// ([`hostwallet::AddressAt`]). Only inside the channel.
+    ///
+    /// `Ok` means queued for the person, who sees the chain and the path and may tick
+    /// "Allow during session" -- after which this is answered without a question until the
+    /// session ends. With [`hostwallet::ask::SHOW`] the address is always put on the
+    /// screen to be compared. The host then polls [`Opcode::HostResult`].
+    HostAddressAt = 0x0056,
+    /// Ask for a signature over a message, whole in one request
+    /// ([`hostwallet::SignMessage`]). Only inside the channel. The key has to be one this
+    /// session was shown; the person reads the message on the device and decides. `Ok`
+    /// means queued; `Refused` + reason for a chain or scheme that does not sign
+    /// messages here, a key not shared, or a message the screen could not show.
+    HostSignMessage = 0x0057,
+    /// What this build answers, and what the session has been given
+    /// ([`hostwallet::Info`]). Only inside the channel. No payload, no question on the
+    /// device, and nothing of the wallet's in the reply; answered while locked too.
+    HostInfo = 0x0058,
     /// Raw, unmixed samples from one of the board's random sources, for a paired
     /// computer to show its owner. **Only inside [`Opcode::NcryMsg`]**, in every build.
     ///
@@ -322,6 +340,9 @@ impl Opcode {
             0x0053 => Opcode::HostSignCommit,
             0x0054 => Opcode::HostResult,
             0x0055 => Opcode::HostAbort,
+            0x0056 => Opcode::HostAddressAt,
+            0x0057 => Opcode::HostSignMessage,
+            0x0058 => Opcode::HostInfo,
             0x0060 => Opcode::RngSample,
             0x0061 => Opcode::RngHealth,
             0x0020 => Opcode::InjectKey,
@@ -393,6 +414,9 @@ pub mod caps {
     /// This build answers the host-wallet commands (`HostAddresses` .. `HostAbort`)
     /// inside the encrypted channel: a computer may ask for addresses and for signatures,
     /// each decided by the person at the device. See [`hostwallet`](super::hostwallet).
+    /// Whether it also answers the later ones (`HostAddressAt`, `HostSignMessage`) is
+    /// what [`HostInfo`](super::Opcode::HostInfo) says; a build without them answers it
+    /// `UnknownOpcode`.
     pub const HOST_WALLET: u8 = 1 << 6;
     /// This build pairs an encrypted channel by a compared code:
     /// [`PairCommit`](super::Opcode::PairCommit), [`PairReveal`](super::Opcode::PairReveal)

@@ -18,6 +18,9 @@ A computer asking the wallet, inside the encrypted channel (the person decides o
 device):
 
     tools/usbclient.py hid --addresses
+    tools/usbclient.py hid --host-info
+    tools/usbclient.py hid --address m/84h/0h/0h/0/3 [--chain btc] [--format p2wpkh] [--show]
+    tools/usbclient.py hid --sign-message "text" --key m/84h/0h/0h/0/3 [--scheme bip322]
     tools/usbclient.py hid --sign tx.psbt --chain btc --key m/84h/0h/0h/0/3 [--out F]
 
 Reading and writing /dev/hidraw* usually needs root or a udev rule -- see docs/USB.md.
@@ -1508,6 +1511,88 @@ def main(path, image=None):
             hostwallet.print_addresses(hostwallet.addresses(call))
         except hostwallet.Refused as e:
             print(f"host      not shared: {e}")
+            return 1
+        return 0
+
+    if "--host-info" in sys.argv:
+        # What this build answers and what this session has been given. Nobody is asked.
+        try:
+            call = open_session(s)
+        except RuntimeError as e:
+            print(e)
+            return 1
+        info = hostwallet.info(call)
+        if info is None:
+            print("host      this firmware has addresses and transaction signing only")
+            return 0
+        hostwallet.print_info(info)
+        return 0
+
+    if "--address" in sys.argv or "--sign-message" in sys.argv:
+        # One address by its path, or a signature over a message by the key at a path.
+        # Both name a chain and an address format; the format defaults to what the path's
+        # purpose means. With `--address` repeated, each is asked in turn on one session,
+        # which is how "Allow during session" is seen to work: tick it at the first.
+        chain_name = arg_after("--chain")[0] if "--chain" in sys.argv else "btc"
+        chain = hostwallet.CHAIN_IDS.get(chain_name.lower())
+        if chain is None:
+            print(f"host      unknown chain {chain_name!r}")
+            return 1
+        fmt_name = arg_after("--format")[0] if "--format" in sys.argv else None
+        if fmt_name is not None and fmt_name not in hostwallet.FORMAT_IDS:
+            print(f"host      unknown format {fmt_name!r}: one of "
+                  + " ".join(hostwallet.FORMAT_IDS))
+            return 1
+
+        def fmt_for(steps):
+            if fmt_name is not None:
+                return hostwallet.FORMAT_IDS[fmt_name]
+            return hostwallet.default_format(chain, steps)
+
+        signing = "--sign-message" in sys.argv
+        if signing:
+            text = arg_after("--sign-message")[0]
+            # `@file` reads the message from a file, as it is.
+            message = open(text[1:], "rb").read() if text.startswith("@") else text.encode()
+            if "--key" not in sys.argv:
+                print("host      name the --key that signs")
+                return 1
+            steps = hostwallet.parse_path(arg_after("--key")[0])
+            fmt = fmt_for(steps)
+            scheme_name = (arg_after("--scheme")[0] if "--scheme" in sys.argv
+                           else "eip191" if chain == 2 else "bip322" if fmt == 4 else "bip137")
+            scheme = hostwallet.SCHEME_IDS.get(scheme_name)
+            if scheme is None:
+                print(f"host      unknown scheme {scheme_name!r}: one of "
+                      + " ".join(hostwallet.SCHEME_IDS))
+                return 1
+        else:
+            paths = [hostwallet.parse_path(sys.argv[i + 1])
+                     for i, a in enumerate(sys.argv) if a == "--address"]
+        try:
+            call = open_session(s)
+        except RuntimeError as e:
+            print(e)
+            return 1
+        try:
+            if signing:
+                # The key has to be one this session was shown: ask for its address first.
+                hostwallet.address_at(call, chain, fmt, steps)
+                r = hostwallet.sign_message(call, chain, fmt, scheme, steps, message)
+                sig = r["signature"]
+                shown = "0x" + sig.hex() if r["scheme"] == 4 else sig.decode()
+                print(f"message   signed by {r['address']}  {hostwallet.path_text(r['path'])}")
+                print(f"message   {hostwallet.SCHEME.get(r['scheme'], r['scheme'])}  {shown}")
+            else:
+                for steps in paths:
+                    a = hostwallet.address_at(call, chain, fmt_for(steps), steps,
+                                              show="--show" in sys.argv)
+                    print(f"address   {hostwallet.CHAIN_NAMES.get(a['chain'], a['chain'])} "
+                          f"{hostwallet.FORMAT.get(a['format'], a['format'])} "
+                          f"{hostwallet.path_text(a['path'])}  {a['address']}")
+                    print(f"address   pubkey {a['pubkey']}  wallet {a['fingerprint']}")
+        except hostwallet.Refused as e:
+            print(f"host      not done: {e}")
             return 1
         return 0
 

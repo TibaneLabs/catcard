@@ -1,5 +1,5 @@
-//! Host-wallet commands: a computer asks for addresses, or for a signature, and a person
-//! at the device decides.
+//! Host-wallet commands: a computer asks for addresses, for one address by its path, or
+//! for a signature over a transaction or a message, and a person at the device decides.
 //!
 //! Everything here is **encrypted-channel only**: the opcodes are answered only inside
 //! [`Opcode::NcryMsg`](crate::Opcode::NcryMsg), and in the clear they are
@@ -46,6 +46,15 @@ const _: () = assert!(2 + 4 + PAGE_MAX + ncry::TAG_LEN <= 512);
 /// the two-byte opcode and the four-byte offset.
 pub const DATA_MAX: usize = ncry::PLAIN_MAX - 2 - 4;
 
+/// Longest message a `HostSignMessage` carries. One sealed record holds the whole request,
+/// so this is what is left of it after the head and the deepest path, rounded down. A
+/// scheme may allow less (Bitcoin's are 240 characters), and the device refuses whatever
+/// its screen cannot show whole.
+pub const MESSAGE_MAX: usize = 960;
+
+// Opcode, head, deepest path, length and message inside one sealed record.
+const _: () = assert!(2 + 4 + (1 + 4 * MAX_DEPTH) + 2 + MESSAGE_MAX <= ncry::PLAIN_MAX);
+
 /// Longest refusal reason the device sends. Short English, for a log line or a dialog.
 pub const REASON_MAX: usize = 64;
 
@@ -66,7 +75,8 @@ pub mod stage {
     pub const OTHER_SESSION: u8 = 4;
 }
 
-/// The one-byte reason `NotNow` carries in reply to `HostAddresses` and `HostSignBegin`.
+/// The one-byte reason `NotNow` carries in reply to a new question: `HostAddresses`,
+/// `HostAddressAt`, `HostSignBegin` and `HostSignMessage`.
 pub mod busy {
     /// The PIN has not been entered.
     pub const LOCKED: u8 = 1;
@@ -81,6 +91,63 @@ pub mod kind {
     pub const BITCOIN: u8 = 2;
     pub const EVM: u8 = 3;
     pub const SOLANA: u8 = 4;
+    /// One address, asked for by its path.
+    pub const ADDRESS: u8 = 5;
+    /// A signed message.
+    pub const MESSAGE: u8 = 6;
+}
+
+/// Flag bits of a `HostAddressAt` request. Any other bit is refused.
+pub mod ask {
+    /// Put the address on the device's screen for the person to compare with what the
+    /// computer shows, whatever this session has been allowed. The result comes back when
+    /// they have said it matches; `Declined` when they have not.
+    pub const SHOW: u8 = 1 << 0;
+    /// Every bit this build reads.
+    pub const ALL: u8 = SHOW;
+}
+
+/// How a message is signed.
+pub mod scheme {
+    /// The "Bitcoin Signed Message" digest and a 65-byte recoverable signature (BIP-137),
+    /// for P2PKH, P2SH-P2WPKH and P2WPKH. The result's signature is its base64.
+    pub const BIP137: u8 = 1;
+    /// BIP-322, simple: the witness stack, base64. P2WPKH and P2TR.
+    pub const BIP322: u8 = 2;
+    /// BIP-322, full: the whole `to_sign` transaction, base64. Every type but P2PKH.
+    pub const BIP322_FULL: u8 = 3;
+    /// EIP-191 `personal_sign`: Keccak-256 of `"\x19Ethereum Signed Message:\n"`, the
+    /// length in decimal, and the message. The result's signature is the 65 bytes
+    /// `r || s || v`, `v` 27 or 28.
+    pub const EIP191: u8 = 4;
+}
+
+/// What a chain can be asked for, in a `HostInfo` reply.
+pub mod can {
+    /// Addresses: `HostAddresses` and `HostAddressAt`.
+    pub const ADDRESSES: u8 = 1 << 0;
+    /// Transaction signatures: `HostSignBegin`.
+    pub const SIGN: u8 = 1 << 1;
+    /// Message signatures: `HostSignMessage`.
+    pub const MESSAGES: u8 = 1 << 2;
+}
+
+/// Which commands beyond the first six this build answers, in a `HostInfo` reply. (That
+/// `HostInfo` answered at all is the first thing it says: a build without it answers
+/// `UnknownOpcode`.)
+pub mod feature {
+    pub const ADDRESS_AT: u8 = 1 << 0;
+    pub const SIGN_MESSAGE: u8 = 1 << 1;
+}
+
+/// What the session asking has been given, in a `HostInfo` reply.
+pub mod session {
+    /// The person ticked "Allow during session": `HostAddressAt` is answered without a
+    /// question until the session ends.
+    pub const PATHS_ALLOWED: u8 = 1 << 0;
+    /// Something has been shared -- an account, or an address by its path -- so a sign
+    /// request has keys it may name.
+    pub const SHARED: u8 = 1 << 1;
 }
 
 /// Which shape an address entry is.
@@ -196,6 +263,11 @@ impl<'a> Cursor<'a> {
         Ok(self.take(1)?[0])
     }
 
+    fn u16(&mut self) -> Result<u16, Error> {
+        let s = self.take(2)?;
+        Ok(u16::from_le_bytes([s[0], s[1]]))
+    }
+
     fn u32(&mut self) -> Result<u32, Error> {
         let s = self.take(4)?;
         Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
@@ -255,6 +327,10 @@ impl<'a> Out<'a> {
 
     fn u8(&mut self, v: u8) -> Result<(), Error> {
         self.put(&[v])
+    }
+
+    fn u16(&mut self, v: u16) -> Result<(), Error> {
+        self.put(&v.to_le_bytes())
     }
 
     fn u32(&mut self, v: u32) -> Result<(), Error> {
@@ -353,13 +429,123 @@ pub fn decode_offset(p: &[u8]) -> Result<u32, Error> {
     Ok(v)
 }
 
-/// A request with no payload (`HostAddresses`, `HostSignCommit`, `HostAbort`): anything
-/// in it is refused rather than ignored.
+/// A request with no payload (`HostAddresses`, `HostSignCommit`, `HostAbort`, `HostInfo`):
+/// anything in it is refused rather than ignored.
 pub fn decode_empty(p: &[u8]) -> Result<(), Error> {
     if p.is_empty() {
         Ok(())
     } else {
         Err(Error::Trailing)
+    }
+}
+
+/// `HostAddressAt`: `[u8 chain][u8 format][u8 flags][path]`, and nothing after the path.
+///
+/// `format` is one of [`format`] and has to be one the chain has; `flags` is [`ask`].
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct AddressAt {
+    pub chain: u8,
+    pub format: u8,
+    pub flags: u8,
+    pub path: Path,
+}
+
+impl AddressAt {
+    pub fn decode(p: &[u8]) -> Result<Self, Error> {
+        let mut c = Cursor::new(p);
+        let chain = c.u8()?;
+        let format = c.u8()?;
+        let flags = c.u8()?;
+        if flags & !ask::ALL != 0 {
+            return Err(Error::BadValue);
+        }
+        let path = c.path()?;
+        c.done()?;
+        Ok(Self {
+            chain,
+            format,
+            flags,
+            path,
+        })
+    }
+
+    /// The request into `out`; returns the length.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if self.flags & !ask::ALL != 0 || self.path.depth == 0 {
+            return Err(Error::BadValue);
+        }
+        let mut o = Out::new(out);
+        o.u8(self.chain)?;
+        o.u8(self.format)?;
+        o.u8(self.flags)?;
+        o.path(&self.path)?;
+        Ok(o.at)
+    }
+}
+
+/// `HostSignMessage`, whole in one request:
+///
+/// ```text
+/// [u8 version = 1][u8 chain][u8 format][u8 scheme][path][u16 length][message]
+/// ```
+///
+/// `format` is the address the signature speaks for ([`format`]), `scheme` how it is made
+/// ([`scheme`]), `path` the one key that signs. Nothing may follow the message.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct SignMessage<'a> {
+    pub chain: u8,
+    pub format: u8,
+    pub scheme: u8,
+    pub path: Path,
+    /// 1 to [`MESSAGE_MAX`] bytes. What they may be is the scheme's to say.
+    pub message: &'a [u8],
+}
+
+impl<'a> SignMessage<'a> {
+    pub fn decode(p: &'a [u8]) -> Result<Self, Error> {
+        let mut c = Cursor::new(p);
+        if c.u8()? != VERSION {
+            return Err(Error::Version);
+        }
+        let chain = c.u8()?;
+        let format = c.u8()?;
+        let scheme = c.u8()?;
+        let path = c.path()?;
+        let n = c.u16()? as usize;
+        if n == 0 {
+            return Err(Error::BadValue);
+        }
+        if n > MESSAGE_MAX {
+            return Err(Error::TooLong);
+        }
+        let message = c.take(n)?;
+        c.done()?;
+        Ok(Self {
+            chain,
+            format,
+            scheme,
+            path,
+            message,
+        })
+    }
+
+    /// The request into `out`; returns the length.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if self.message.is_empty() || self.path.depth == 0 {
+            return Err(Error::BadValue);
+        }
+        if self.message.len() > MESSAGE_MAX {
+            return Err(Error::TooLong);
+        }
+        let mut o = Out::new(out);
+        o.u8(VERSION)?;
+        o.u8(self.chain)?;
+        o.u8(self.format)?;
+        o.u8(self.scheme)?;
+        o.path(&self.path)?;
+        o.u16(self.message.len() as u16)?;
+        o.put(self.message)?;
+        Ok(o.at)
     }
 }
 
@@ -650,6 +836,204 @@ fn entry<'a>(c: &mut Cursor<'a>) -> Result<Entry<'a>, Error> {
 }
 
 // ---------------------------------------------------------------------------
+// One address, by its path
+// ---------------------------------------------------------------------------
+
+/// The answer to `HostAddressAt`.
+///
+/// ```text
+/// [u8 kind = ADDRESS][u8 version = 1][4 master fingerprint][u8 chain][u8 format]
+/// [path]
+/// [u8 len][address, ASCII]
+/// [u8 len][public key]        33 bytes compressed secp256k1, or 32 ed25519
+/// ```
+///
+/// No extended key: this is one key, and nothing below it can be derived from the reply.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct AddressReply<'a> {
+    pub fingerprint: [u8; 4],
+    pub chain: u8,
+    pub format: u8,
+    pub path: Path,
+    pub address: &'a [u8],
+    pub pubkey: &'a [u8],
+}
+
+impl<'a> AddressReply<'a> {
+    /// The reply into `out`; returns the length.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if self.address.is_empty() || self.pubkey.is_empty() || self.path.depth == 0 {
+            return Err(Error::BadValue);
+        }
+        let mut o = Out::new(out);
+        o.u8(kind::ADDRESS)?;
+        o.u8(VERSION)?;
+        o.put(&self.fingerprint)?;
+        o.u8(self.chain)?;
+        o.u8(self.format)?;
+        o.path(&self.path)?;
+        o.short(self.address)?;
+        o.short(self.pubkey)?;
+        Ok(o.at)
+    }
+
+    pub fn decode(r: &'a [u8]) -> Result<Self, Error> {
+        let mut c = Cursor::new(r);
+        if c.u8()? != kind::ADDRESS {
+            return Err(Error::BadValue);
+        }
+        if c.u8()? != VERSION {
+            return Err(Error::Version);
+        }
+        let mut fingerprint = [0u8; 4];
+        fingerprint.copy_from_slice(c.take(4)?);
+        let chain = c.u8()?;
+        let format = c.u8()?;
+        let path = c.path()?;
+        let address = c.short()?;
+        let pubkey = c.short()?;
+        c.done()?;
+        Ok(Self {
+            fingerprint,
+            chain,
+            format,
+            path,
+            address,
+            pubkey,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What this build answers
+// ---------------------------------------------------------------------------
+
+/// The fixed head of a `HostInfo` reply, before its chains.
+pub const INFO_HEAD: usize = 1 + 1 + 1 + 2 + 1;
+
+/// Writes the answer to `HostInfo`:
+///
+/// ```text
+/// [u8 version = 1][u8 features][u8 session][u16 longest message][u8 count]
+/// count × [u8 chain][u8 can][u8 n][n × u8 format]
+/// ```
+///
+/// Nothing in it is the wallet's: which chains this build carries and what each can be
+/// asked for, and what the session asking has been given so far.
+pub struct InfoWriter<'a> {
+    out: Out<'a>,
+    count: u8,
+}
+
+impl<'a> InfoWriter<'a> {
+    pub fn new(out: &'a mut [u8], features: u8, session: u8) -> Result<Self, Error> {
+        let mut o = Out::new(out);
+        o.u8(VERSION)?;
+        o.u8(features)?;
+        o.u8(session)?;
+        o.u16(MESSAGE_MAX as u16)?;
+        o.u8(0)?;
+        Ok(Self { out: o, count: 0 })
+    }
+
+    /// Append a chain. A failure leaves what was written before it intact.
+    pub fn push(&mut self, chain: u8, can: u8, formats: &[u8]) -> Result<(), Error> {
+        if self.count == u8::MAX {
+            return Err(Error::TooLong);
+        }
+        let mark = self.out.at;
+        let r = (|| {
+            self.out.u8(chain)?;
+            self.out.u8(can)?;
+            self.out.short(formats)
+        })();
+        match r {
+            Ok(()) => {
+                self.count += 1;
+                Ok(())
+            }
+            Err(err) => {
+                self.out.at = mark;
+                Err(err)
+            }
+        }
+    }
+
+    /// Seal the count into the head and return the reply's length.
+    pub fn finish(self) -> usize {
+        let at = self.out.at;
+        self.out.b[INFO_HEAD - 1] = self.count;
+        at
+    }
+}
+
+/// One chain of a `HostInfo` reply.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ChainInfo<'a> {
+    pub chain: u8,
+    /// [`can`] bits.
+    pub can: u8,
+    /// The [`format`]s this chain has, most usual first.
+    pub formats: &'a [u8],
+}
+
+/// A `HostInfo` reply being read.
+#[derive(Clone, Debug)]
+pub struct Info<'a> {
+    /// [`feature`] bits.
+    pub features: u8,
+    /// [`session`] bits.
+    pub session: u8,
+    /// Longest message `HostSignMessage` takes on the wire.
+    pub message_max: u16,
+    pub count: u8,
+    body: &'a [u8],
+}
+
+impl<'a> Info<'a> {
+    /// Read the head, and every chain once, so a malformed reply is refused here.
+    pub fn decode(r: &'a [u8]) -> Result<Self, Error> {
+        let mut c = Cursor::new(r);
+        if c.u8()? != VERSION {
+            return Err(Error::Version);
+        }
+        let features = c.u8()?;
+        let session = c.u8()?;
+        let message_max = c.u16()?;
+        let count = c.u8()?;
+        let me = Self {
+            features,
+            session,
+            message_max,
+            count,
+            body: c.rest(),
+        };
+        let mut c = Cursor::new(me.body);
+        for _ in 0..count {
+            chain_info(&mut c)?;
+        }
+        c.done()?;
+        Ok(me)
+    }
+
+    pub fn chains(&self) -> impl Iterator<Item = ChainInfo<'a>> + '_ {
+        let mut c = Cursor::new(self.body);
+        (0..self.count).map_while(move |_| chain_info(&mut c).ok())
+    }
+}
+
+fn chain_info<'a>(c: &mut Cursor<'a>) -> Result<ChainInfo<'a>, Error> {
+    let chain = c.u8()?;
+    let can = c.u8()?;
+    let formats = c.short()?;
+    Ok(ChainInfo {
+        chain,
+        can,
+        formats,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Sign results
 // ---------------------------------------------------------------------------
 
@@ -756,6 +1140,77 @@ pub fn read_solana(r: &[u8]) -> Result<(&[u8], &[u8]), Error> {
     let tx = c.take(n)?;
     c.done()?;
     Ok((sigs, tx))
+}
+
+/// A signed message.
+///
+/// ```text
+/// [u8 kind = MESSAGE][u8 version = 1][u8 chain][u8 scheme]
+/// [path]
+/// [u8 len][address, ASCII]
+/// [u16 len][signature]
+/// ```
+///
+/// The signature is in the form the scheme's verifiers take ([`scheme`]): base64 text for
+/// the Bitcoin ones, 65 raw bytes for EIP-191.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct MessageReply<'a> {
+    pub chain: u8,
+    pub scheme: u8,
+    pub path: Path,
+    /// The address the signature speaks for.
+    pub address: &'a [u8],
+    pub signature: &'a [u8],
+}
+
+impl<'a> MessageReply<'a> {
+    /// Bytes the reply takes for an address and a signature of these lengths, at the
+    /// deepest path.
+    pub const fn max_len(address: usize, signature: usize) -> usize {
+        4 + (1 + 4 * MAX_DEPTH) + 1 + address + 2 + signature
+    }
+
+    /// The reply into `out`; returns the length.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize, Error> {
+        if self.address.is_empty() || self.signature.is_empty() || self.path.depth == 0 {
+            return Err(Error::BadValue);
+        }
+        let n = u16::try_from(self.signature.len()).map_err(|_| Error::TooLong)?;
+        let mut o = Out::new(out);
+        o.u8(kind::MESSAGE)?;
+        o.u8(VERSION)?;
+        o.u8(self.chain)?;
+        o.u8(self.scheme)?;
+        o.path(&self.path)?;
+        o.short(self.address)?;
+        o.u16(n)?;
+        o.put(self.signature)?;
+        Ok(o.at)
+    }
+
+    pub fn decode(r: &'a [u8]) -> Result<Self, Error> {
+        let mut c = Cursor::new(r);
+        if c.u8()? != kind::MESSAGE {
+            return Err(Error::BadValue);
+        }
+        if c.u8()? != VERSION {
+            return Err(Error::Version);
+        }
+        let chain = c.u8()?;
+        let scheme = c.u8()?;
+        let path = c.path()?;
+        let address = c.short()?;
+        let n = c.u16()? as usize;
+        let signature = c.take(n)?;
+        c.done()?;
+        Ok(Self {
+            chain,
+            scheme,
+            path,
+            address,
+            signature,
+        })
+    }
 }
 
 #[cfg(test)]

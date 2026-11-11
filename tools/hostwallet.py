@@ -1,4 +1,5 @@
-"""Host-wallet commands: ask a CatCard for addresses, or for a signature.
+"""Host-wallet commands: ask a CatCard for addresses, one address by its path, or a
+signature over a transaction or a message.
 
 The host half of `catcard_usb::hostwallet`, written from `docs/USB.md` §"Host-wallet
 commands" rather than shared with the firmware. Every command travels inside the encrypted
@@ -8,8 +9,12 @@ The shape is the upgrade offer's: the host asks, the device shows the question t
 person holding it, the person decides on the device, and the host polls `HostResult`
 until there is an answer. Nothing here can answer for the person.
 
+    usbclient.py hid --host-info
     usbclient.py hid --addresses
+    usbclient.py hid --address m/84h/0h/0h/0/3 [--chain btc] [--format p2wpkh] [--show]
     usbclient.py hid --sign tx.psbt --chain btc --key m/84h/0h/0h/0/3 [--key ...] [--out F]
+    usbclient.py hid --sign-message "text" --key m/84h/0h/0h/0/3 [--chain btc]
+                     [--format p2wpkh] [--scheme bip137|bip322|bip322-full|eip191]
     usbclient.py --selftest          (includes the layout checks below; no device needed)
 """
 import struct
@@ -21,6 +26,9 @@ HOST_SIGN_DATA = 0x0052
 HOST_SIGN_COMMIT = 0x0053
 HOST_RESULT = 0x0054
 HOST_ABORT = 0x0055
+HOST_ADDRESS_AT = 0x0056
+HOST_SIGN_MESSAGE = 0x0057
+HOST_INFO = 0x0058
 
 # Capability bit, matching `catcard_usb::caps::HOST_WALLET`.
 CAP_HOST_WALLET = 1 << 6
@@ -32,8 +40,10 @@ PAGE_MAX = 448
 # Sealed plaintext bound (1024) less the opcode and the offset.
 DATA_MAX = 1024 - 2 - 4
 HARDENED = 0x8000_0000
+# One sealed record holds a whole message request.
+MESSAGE_MAX = 960
 
-OK, NOT_NOW, BAD_REQUEST, DECLINED, REFUSED = 0, 2, 3, 4, 5
+OK, UNKNOWN_OPCODE, NOT_NOW, BAD_REQUEST, DECLINED, REFUSED = 0, 1, 2, 3, 4, 5
 
 STAGE = {0: "nothing asked", 1: "upload open", 2: "waiting for the screen",
          3: "the person is deciding", 4: "busy with another session's request"}
@@ -41,9 +51,21 @@ BUSY = {1: "the device is locked: enter the PIN first",
         2: "another request or an upgrade is pending"}
 
 KIND_ADDRESSES, KIND_BITCOIN, KIND_EVM, KIND_SOLANA = 1, 2, 3, 4
+KIND_ADDRESS, KIND_MESSAGE = 5, 6
+# HostAddressAt flags.
+ASK_SHOW = 1
+SCHEME = {1: "bip137", 2: "bip322", 3: "bip322-full", 4: "eip191"}
+SCHEME_IDS = {v: k for k, v in SCHEME.items()}
+# HostInfo bits.
+CAN = {1: "addresses", 2: "sign", 4: "messages"}
+FEATURE = {1: "address-at", 2: "sign-message"}
+SESSION = {1: "paths-allowed", 2: "shared"}
 SHAPE = {1: "utxo", 2: "account"}
 FORMAT = {1: "p2pkh", 2: "p2sh-p2wpkh", 3: "p2wpkh", 4: "p2tr", 5: "evm", 6: "tron",
           7: "solana"}
+FORMAT_IDS = {v: k for k, v in FORMAT.items()}
+# The script type a BIP-44-family purpose means, for a Bitcoin path given without one.
+PURPOSE_FORMAT = {44: 1, 49: 2, 84: 3, 86: 4}
 CHAIN_IDS = {"btc": 1, "eth": 2, "evm": 2, "sol": 3, "ltc": 4, "doge": 5, "bch": 6,
              "mona": 7, "xep": 8, "trx": 9, "nmc": 10}
 CHAIN_NAMES = {1: "Bitcoin", 2: "Ethereum", 3: "Solana", 4: "Litecoin", 5: "Dogecoin",
@@ -96,6 +118,9 @@ class Reader:
     def u8(self):
         return self.take(1)[0]
 
+    def u16(self):
+        return struct.unpack("<H", self.take(2))[0]
+
     def u32(self):
         return struct.unpack("<I", self.take(4))[0]
 
@@ -123,6 +148,68 @@ def sign_blob(chain, keys, tx):
         raise ValueError("empty transaction")
     return (bytes([VERSION, chain, len(keys)]) + b"".join(enc_path(k) for k in keys)
             + struct.pack("<I", len(tx)) + tx)
+
+
+def address_at_request(chain, fmt, steps, show=False):
+    """[u8 chain][u8 format][u8 flags][path]."""
+    return bytes([chain, fmt, ASK_SHOW if show else 0]) + enc_path(steps)
+
+
+def message_request(chain, fmt, scheme, steps, message):
+    """[u8 version][u8 chain][u8 format][u8 scheme][path][u16 len][message]."""
+    if not 1 <= len(message) <= MESSAGE_MAX:
+        raise ValueError(f"a message is 1..{MESSAGE_MAX} bytes")
+    return (bytes([VERSION, chain, fmt, scheme]) + enc_path(steps)
+            + struct.pack("<H", len(message)) + message)
+
+
+def decode_address(r):
+    rd = Reader(r)
+    if rd.u8() != KIND_ADDRESS or rd.u8() != VERSION:
+        raise ValueError("not an address-by-path reply")
+    e = {"fingerprint": rd.take(4).hex(), "chain": rd.u8(), "format": rd.u8(),
+         "path": rd.path()}
+    e["address"] = rd.short().decode()
+    e["pubkey"] = rd.short().hex()
+    rd.done()
+    return e
+
+
+def decode_message(r):
+    rd = Reader(r)
+    if rd.u8() != KIND_MESSAGE or rd.u8() != VERSION:
+        raise ValueError("not a message result")
+    e = {"chain": rd.u8(), "scheme": rd.u8(), "path": rd.path()}
+    e["address"] = rd.short().decode()
+    e["signature"] = rd.take(rd.u16())
+    rd.done()
+    return e
+
+
+def decode_info(r):
+    rd = Reader(r)
+    if rd.u8() != VERSION:
+        raise ValueError("not an info reply this tool reads")
+    info = {"features": rd.u8(), "session": rd.u8(), "message_max": rd.u16(), "chains": []}
+    for _ in range(rd.u8()):
+        info["chains"].append({"chain": rd.u8(), "can": rd.u8(), "formats": list(rd.short())})
+    rd.done()
+    return info
+
+
+def default_format(chain, steps):
+    """The address format to ask for when none was named: the chain's one, or for
+    Bitcoin the one its path's purpose means (native segwit when it means none)."""
+    if chain == 2:
+        return 5
+    if chain == 9:
+        return 6
+    if chain == 3:
+        return 7
+    purpose = steps[0] & ~HARDENED if steps and steps[0] & HARDENED else None
+    if chain == 1:
+        return PURPOSE_FORMAT.get(purpose, 3)
+    return 1
 
 
 def decode_addresses(r):
@@ -265,6 +352,55 @@ def sign(call, chain, keys, tx):
     return await_result(call)
 
 
+def info(call):
+    """What this build answers and what the session has. `None` from a device that
+    predates the command (it answers `UnknownOpcode`): it has the first six only."""
+    st, body = call(HOST_INFO, b"")
+    if st == UNKNOWN_OPCODE:
+        return None
+    if st != OK:
+        raise ValueError(f"HostInfo status {st}")
+    return decode_info(body)
+
+
+def ask(call, opcode, payload, name):
+    """Send a one-request question and wait for the person's answer."""
+    st, body = call(opcode, payload)
+    if st == UNKNOWN_OPCODE:
+        raise Refused("this device's firmware does not have that command")
+    if st == NOT_NOW:
+        raise Refused(not_now(body))
+    if st == REFUSED:
+        raise Refused(body.decode(errors="replace"))
+    if st != OK:
+        raise ValueError(f"{name} status {st}")
+    print("host      asked; answer on the device")
+    return await_result(call)
+
+
+def address_at(call, chain, fmt, steps, show=False):
+    return decode_address(ask(call, HOST_ADDRESS_AT,
+                              address_at_request(chain, fmt, steps, show), "HostAddressAt"))
+
+
+def sign_message(call, chain, fmt, scheme, steps, message):
+    return decode_message(ask(call, HOST_SIGN_MESSAGE,
+                              message_request(chain, fmt, scheme, steps, message),
+                              "HostSignMessage"))
+
+
+def bits(value, names):
+    return ", ".join(n for b, n in names.items() if value & b) or "none"
+
+
+def print_info(i):
+    print(f"host      commands: {bits(i['features'], FEATURE)}; "
+          f"session: {bits(i['session'], SESSION)}; longest message {i['message_max']}")
+    for c in i["chains"]:
+        fmts = " ".join(FORMAT.get(f, str(f)) for f in c["formats"])
+        print(f"  {CHAIN_NAMES.get(c['chain'], c['chain']):<16} {bits(c['can'], CAN):<28} {fmts}")
+
+
 def print_addresses(r):
     print(f"wallet    fingerprint {r['fingerprint']}  account {r['account']}")
     for e in r["entries"]:
@@ -313,4 +449,58 @@ def selftest():
     assert decode_evm(bytes([KIND_EVM, 2, 0, 0, 0, 2, 0xf8])) == b"\x02\xf8"
     sol = bytes([KIND_SOLANA, 1, 1]) + b"\x55" * 64 + bytes([1, 0, 0, 0, 0xEE])
     assert decode_solana(sol) == ([(1, b"\x55" * 64)], b"\xee")
+
+    def truncations_refused(decode, reply):
+        for cut in range(len(reply)):
+            try:
+                decode(reply[:cut])
+            except ValueError:
+                continue
+            raise AssertionError(f"truncated reply at {cut} accepted")
+        try:
+            decode(reply + b"\0")
+        except ValueError:
+            return
+        raise AssertionError("trailing byte accepted")
+
+    # One address by its path: the request, and the reply.
+    want = bytes([1, 4, 1, 5, 86, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0,
+                  5, 0, 0, 0])
+    assert address_at_request(1, 4, [86 | H, H, H, 0, 5], show=True) == want
+    assert address_at_request(2, 5, [44 | H])[2] == 0
+    one = bytes([KIND_ADDRESS, 1, 0xde, 0xad, 0xbe, 0xef, 2, 5,
+                 5, 44, 0, 0, 0x80, 60, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 9, 0, 0, 0,
+                 4]) + b"0xAb" + bytes([2, 2, 7])
+    a = decode_address(one)
+    assert a == {"fingerprint": "deadbeef", "chain": 2, "format": 5,
+                 "path": [44 | H, 60 | H, H, 0, 9], "address": "0xAb", "pubkey": "0207"}
+    truncations_refused(decode_address, one)
+    assert default_format(1, [86 | H, H, H, 0, 0]) == 4
+    assert default_format(1, [0, 5]) == 3 and default_format(3, [44 | H]) == 7
+
+    # A message: the request, and the result.
+    want = bytes([1, 1, 3, 2, 5, 84, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0,
+                  3, 0, 0, 0, 2, 0]) + b"hi"
+    assert message_request(1, 3, 2, [84 | H, H, H, 0, 3], b"hi") == want
+    for bad in (b"", b"x" * (MESSAGE_MAX + 1)):
+        try:
+            message_request(1, 3, 1, [84 | H], bad)
+        except ValueError:
+            continue
+        raise AssertionError("a message out of bounds was encoded")
+    msg = bytes([KIND_MESSAGE, 1, 2, 4,
+                 5, 44, 0, 0, 0x80, 60, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0,
+                 4]) + b"0xAb" + bytes([3, 0, 0xAA, 0xBB, 27])
+    m = decode_message(msg)
+    assert m == {"chain": 2, "scheme": 4, "path": [44 | H, 60 | H, H, 0, 0],
+                 "address": "0xAb", "signature": b"\xaa\xbb\x1b"}
+    truncations_refused(decode_message, msg)
+
+    # What a build answers.
+    inf = bytes([1, 0b11, 0b10, 0xC0, 0x03, 2, 1, 0b111, 2, 3, 4, 9, 0b001, 1, 6])
+    i = decode_info(inf)
+    assert i["features"] == 3 and i["session"] == 2 and i["message_max"] == MESSAGE_MAX
+    assert i["chains"] == [{"chain": 1, "can": 7, "formats": [3, 4]},
+                           {"chain": 9, "can": 1, "formats": [6]}]
+    truncations_refused(decode_info, inf)
     print("selftest  host-wallet layouts ok")

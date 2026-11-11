@@ -387,3 +387,247 @@ fn results_refuse_a_buffer_too_small() {
         Err(Error::NoRoom)
     );
 }
+
+// ---- one address by its path --------------------------------------------------------
+
+#[test]
+fn the_address_at_request_layout_is_pinned() {
+    let req = AddressAt {
+        chain: 1,
+        format: format::P2TR,
+        flags: ask::SHOW,
+        path: path(&[86 | H, H, H, 0, 5]),
+    };
+    let mut out = [0u8; 64];
+    let n = req.encode(&mut out).unwrap();
+    #[rustfmt::skip]
+    let want: &[u8] = &[
+        1, format::P2TR, 1,
+        5, 86, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 5, 0, 0, 0,
+    ];
+    assert_eq!(&out[..n], want);
+    assert_eq!(AddressAt::decode(want), Ok(req));
+}
+
+#[test]
+fn the_address_at_request_refuses_what_a_host_got_wrong() {
+    let good: &[u8] = &[2, format::EVM, 0, 1, 44, 0, 0, 0x80];
+    assert!(AddressAt::decode(good).is_ok());
+    // Every truncation, and one byte too many.
+    for cut in 0..good.len() {
+        assert!(AddressAt::decode(&good[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut long = good.to_vec();
+    long.push(0);
+    assert_eq!(AddressAt::decode(&long), Err(Error::Trailing));
+    // A flag bit this build does not read is refused, not ignored: a host that set it
+    // meant something by it.
+    let mut flagged = good.to_vec();
+    flagged[2] = 0x02;
+    assert_eq!(AddressAt::decode(&flagged), Err(Error::BadValue));
+    // No path, and a path past the bound.
+    assert_eq!(AddressAt::decode(&[2, 5, 0, 0]), Err(Error::BadPath));
+    let mut deep = vec![2, 5, 0, (MAX_DEPTH + 1) as u8];
+    deep.extend(core::iter::repeat_n(0u8, 4 * (MAX_DEPTH + 1)));
+    assert_eq!(AddressAt::decode(&deep), Err(Error::BadPath));
+}
+
+#[test]
+fn the_address_by_path_reply_layout_is_pinned() {
+    let reply = AddressReply {
+        fingerprint: [0xde, 0xad, 0xbe, 0xef],
+        chain: 2,
+        format: format::EVM,
+        path: path(&[44 | H, 60 | H, H, 0, 9]),
+        address: b"0xAb",
+        pubkey: &[2, 7],
+    };
+    let mut out = [0u8; 64];
+    let n = reply.encode(&mut out).unwrap();
+    #[rustfmt::skip]
+    let want: &[u8] = &[
+        kind::ADDRESS, VERSION, 0xde, 0xad, 0xbe, 0xef, 2, format::EVM,
+        5, 44, 0, 0, 0x80, 60, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 9, 0, 0, 0,
+        4, b'0', b'x', b'A', b'b',
+        2, 2, 7,
+    ];
+    assert_eq!(&out[..n], want);
+    assert_eq!(AddressReply::decode(want), Ok(reply));
+    for cut in 0..want.len() {
+        assert!(AddressReply::decode(&want[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut long = want.to_vec();
+    long.push(0);
+    assert_eq!(AddressReply::decode(&long), Err(Error::Trailing));
+    // The many-address reply is a different kind, and is not read as this one.
+    let mut other = want.to_vec();
+    other[0] = kind::ADDRESSES;
+    assert_eq!(AddressReply::decode(&other), Err(Error::BadValue));
+}
+
+// ---- messages -------------------------------------------------------------------------
+
+#[test]
+fn the_sign_message_request_layout_is_pinned() {
+    let req = SignMessage {
+        chain: 1,
+        format: format::P2WPKH,
+        scheme: scheme::BIP322,
+        path: path(&[84 | H, H, H, 0, 3]),
+        message: b"hi",
+    };
+    let mut out = [0u8; 64];
+    let n = req.encode(&mut out).unwrap();
+    #[rustfmt::skip]
+    let want: &[u8] = &[
+        VERSION, 1, format::P2WPKH, scheme::BIP322,
+        5, 84, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 3, 0, 0, 0,
+        2, 0, b'h', b'i',
+    ];
+    assert_eq!(&out[..n], want);
+    assert_eq!(SignMessage::decode(want), Ok(req));
+}
+
+#[test]
+fn the_sign_message_request_refuses_what_a_host_got_wrong() {
+    #[rustfmt::skip]
+    let good: &[u8] = &[
+        VERSION, 2, format::EVM, scheme::EIP191,
+        1, 44, 0, 0, 0x80,
+        3, 0, b'a', b'\n', b'b',
+    ];
+    assert!(SignMessage::decode(good).is_ok());
+    for cut in 0..good.len() {
+        assert!(SignMessage::decode(&good[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut long = good.to_vec();
+    long.push(b'c');
+    assert_eq!(SignMessage::decode(&long), Err(Error::Trailing));
+    let mut v = good.to_vec();
+    v[0] = VERSION + 1;
+    assert_eq!(SignMessage::decode(&v), Err(Error::Version));
+    // An empty message is not a message.
+    #[rustfmt::skip]
+    let empty: &[u8] = &[VERSION, 2, format::EVM, scheme::EIP191, 1, 44, 0, 0, 0x80, 0, 0];
+    assert_eq!(SignMessage::decode(empty), Err(Error::BadValue));
+}
+
+#[test]
+fn the_longest_message_fits_one_sealed_record_and_one_more_byte_is_refused() {
+    let deep = path(&[H; MAX_DEPTH]);
+    let text = vec![b'x'; MESSAGE_MAX + 1];
+    let mut out = vec![0u8; 2048];
+    let req = SignMessage {
+        chain: 2,
+        format: format::EVM,
+        scheme: scheme::EIP191,
+        path: deep,
+        message: &text[..MESSAGE_MAX],
+    };
+    let n = req.encode(&mut out).unwrap();
+    // The opcode travels in the same record.
+    assert!(2 + n <= ncry::PLAIN_MAX);
+    assert_eq!(SignMessage::decode(&out[..n]), Ok(req));
+
+    let over = SignMessage {
+        message: &text,
+        ..req
+    };
+    assert_eq!(over.encode(&mut out), Err(Error::TooLong));
+    // And a host that sends it anyway: the declared length alone refuses it.
+    let mut raw = out[..n].to_vec();
+    let at = 4 + deep.encoded_len();
+    raw[at..at + 2].copy_from_slice(&((MESSAGE_MAX + 1) as u16).to_le_bytes());
+    raw.push(b'x');
+    assert_eq!(SignMessage::decode(&raw), Err(Error::TooLong));
+}
+
+#[test]
+fn the_message_result_layout_is_pinned() {
+    let reply = MessageReply {
+        chain: 2,
+        scheme: scheme::EIP191,
+        path: path(&[44 | H, 60 | H, H, 0, 0]),
+        address: b"0xAb",
+        signature: &[0xAA, 0xBB, 27],
+    };
+    let mut out = [0u8; 64];
+    let n = reply.encode(&mut out).unwrap();
+    #[rustfmt::skip]
+    let want: &[u8] = &[
+        kind::MESSAGE, VERSION, 2, scheme::EIP191,
+        5, 44, 0, 0, 0x80, 60, 0, 0, 0x80, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0,
+        4, b'0', b'x', b'A', b'b',
+        3, 0, 0xAA, 0xBB, 27,
+    ];
+    assert_eq!(&out[..n], want);
+    assert_eq!(MessageReply::decode(want), Ok(reply));
+    assert!(n <= MessageReply::max_len(4, 3));
+    for cut in 0..want.len() {
+        assert!(MessageReply::decode(&want[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut long = want.to_vec();
+    long.push(0);
+    assert_eq!(MessageReply::decode(&long), Err(Error::Trailing));
+    // Too small a buffer is an error, never a short write.
+    assert_eq!(reply.encode(&mut out[..n - 1]), Err(Error::NoRoom));
+}
+
+// ---- what this build answers ----------------------------------------------------------
+
+#[test]
+fn the_info_reply_layout_is_pinned() {
+    let mut out = [0u8; 64];
+    let mut w = InfoWriter::new(
+        &mut out,
+        feature::ADDRESS_AT | feature::SIGN_MESSAGE,
+        session::SHARED,
+    )
+    .unwrap();
+    w.push(
+        1,
+        can::ADDRESSES | can::SIGN | can::MESSAGES,
+        &[format::P2WPKH, format::P2TR],
+    )
+    .unwrap();
+    w.push(9, can::ADDRESSES, &[format::TRON]).unwrap();
+    let n = w.finish();
+    #[rustfmt::skip]
+    let want: &[u8] = &[
+        VERSION, 0b11, 0b10, 0xC0, 0x03, 2,
+        1, 0b111, 2, format::P2WPKH, format::P2TR,
+        9, 0b001, 1, format::TRON,
+    ];
+    assert_eq!(MESSAGE_MAX, 0x03C0);
+    assert_eq!(&out[..n], want);
+
+    let r = Info::decode(want).unwrap();
+    assert_eq!(r.features, 0b11);
+    assert_eq!(r.session, session::SHARED);
+    assert_eq!(r.message_max as usize, MESSAGE_MAX);
+    let all: Vec<ChainInfo<'_>> = r.chains().collect();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].formats, &[format::P2WPKH, format::P2TR]);
+    assert_eq!(all[1].can, can::ADDRESSES);
+
+    for cut in 0..want.len() {
+        assert!(Info::decode(&want[..cut]).is_err(), "cut at {cut}");
+    }
+    let mut long = want.to_vec();
+    long.push(0);
+    assert_eq!(Info::decode(&long).err(), Some(Error::Trailing));
+}
+
+#[test]
+fn a_chain_that_does_not_fit_leaves_the_info_reply_whole() {
+    let mut out = [0u8; INFO_HEAD + 4];
+    let mut w = InfoWriter::new(&mut out, 0, 0).unwrap();
+    w.push(1, can::ADDRESSES, &[format::P2WPKH]).unwrap();
+    assert_eq!(
+        w.push(2, can::ADDRESSES, &[format::EVM]),
+        Err(Error::NoRoom)
+    );
+    let n = w.finish();
+    let r = Info::decode(&out[..n]).unwrap();
+    assert_eq!(r.count, 1);
+}

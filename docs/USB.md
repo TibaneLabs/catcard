@@ -1175,8 +1175,9 @@ under the device's product string, "CatCard".
 
 ### Host-wallet commands: a computer asks, the person decides
 
-Two things a computer may ask the wallet for, **only inside the encrypted channel**:
-its addresses, and a signature. Both follow the upgrade offer's shape -- the host asks,
+Four things a computer may ask the wallet for, **only inside the encrypted channel**:
+its addresses, the one address at a path, a signature over a transaction, and a signature
+over a message. All follow the upgrade offer's shape -- the host asks,
 the device puts the question on its own screen, the person holding it answers there,
 and the host polls for the outcome. The host cannot answer for the person and cannot
 withdraw a question once the device has it; only the person, or a bus reset, ends one.
@@ -1200,6 +1201,13 @@ checking the same bytes.
 | `0x0053` | `HostSignCommit` | empty | `Ok` = queued for the person; `Refused` + reason |
 | `0x0054` | `HostResult` | `[u32 offset]` | `NotNow` + `[u8 stage]`; `Declined`; `Refused` + reason; `Ok` + `[u32 total][page]` |
 | `0x0055` | `HostAbort` | empty | `Ok`; `NotNow` + `[u8 stage]` for a question already queued or on the screen |
+| `0x0056` | `HostAddressAt` | `[u8 chain][u8 format][u8 flags][path]` | `Ok` = queued; `NotNow` + `[u8 busy]`; `Refused` + reason |
+| `0x0057` | `HostSignMessage` | `[u8 version = 1][u8 chain][u8 format][u8 scheme][path][u16 length][message]` | `Ok` = queued for the person; `NotNow` + `[u8 busy]`; `Refused` + reason |
+| `0x0058` | `HostInfo` | empty | `Ok` + what this build answers and what the session has |
+
+The first six are what `caps::HOST_WALLET` promises. The last three came later, and a
+host finds out whether a device has them by sending `HostInfo`: a build without it
+answers `UnknownOpcode`, and has the first six only.
 
 Conventions: integers little-endian. A **path** is `[u8 depth][depth × u32]` with the
 hardened bit (`0x8000_0000`) set on hardened steps, depth 1 to 8. A **chain** is one byte:
@@ -1259,6 +1267,62 @@ the list. It lives in the channel's per-session state and is dropped with the se
 new pairing (`PairCommit`), a teardown after a bad record, `PairAbort`, a bus reset, logout or idle logout (both
 reboot), and a change of the wallet in force (a passphrase).
 
+#### One address, by its path
+
+`HostAddressAt [chain][format][flags][path]` asks for the address of one key the host
+names. `format` is from the list above and has to be one the chain has (Dogecoin has no
+`bc1`-style address to ask for); a Solana path is hardened throughout. Refused at once,
+by name, for a chain not in the build or a format the chain does not have.
+
+On the device: "Computer asks for the <chain> address at" and the path in full, with the
+address type under it -- a screen that has to be read to its end before it can be
+answered. Then **Share address**, a list of two rows:
+
+```text
+[ ] Allow during session
+    Share it
+```
+
+The cursor starts on "Share it", so one OK shares this address and nothing more. Moving
+up and pressing OK ticks the box; "Share it" with the box ticked also gives **this
+session** leave to have any later address by its path without a question. Cancel on
+either screen answers the host `Declined`.
+
+The result:
+
+```text
+[u8 kind = 5][u8 version = 1][4 master fingerprint][u8 chain][u8 format]
+[path]
+[u8 len][address, ASCII]
+[u8 len][public key]         33 bytes compressed secp256k1, or 32 ed25519
+```
+
+No extended key: one public key and its address, from which nothing below it can be
+derived. That is the difference from `HostAddresses`, whose account keys let a host
+derive every address of the account by itself.
+
+**What "Allow during session" covers, exactly.** `HostAddressAt` from the same session,
+any chain in the build, any path, until the session ends -- a new pairing, a teardown, a
+bus reset, logout, or a change of the wallet in force (a passphrase), each of which drops
+it with the rest of the session's state. It is never stored. It does not cover
+`HostAddresses` (extended keys are still asked for every time), and it does not cover any
+signature. A request it answers puts nothing on the screen but the moment of derivation,
+and waits for no key.
+
+`flags` bit 0, **show**: the address is put on the device's screen -- "Same as the
+computer shows?" -- and the result comes back only when the person has said yes,
+allowance or not. This is how a host has an address it is about to display checked
+against the device. Any other flag bit is `BadRequest`.
+
+**A key shared this way may sign.** The device remembers, for the session, each (chain,
+path) it answered -- the last sixteen -- and a later sign request may name exactly those
+keys, as it may name any key under a shared account. Not their siblings, parents or
+children: `hostkeys::check` and its tests. So a host that works by path never needs
+`HostAddresses` at all.
+
+`tools/usbclient.py hid --address m/84h/0h/0h/0/3 [--address ...] [--chain btc]
+[--format p2wpkh] [--show]` asks for each in turn on one session.
+
 #### Signing
 
 The host uploads one **sign blob**:
@@ -1283,7 +1347,8 @@ message.
 2. `HostSignData [offset][bytes]`, in order, up to 1018 bytes each (the reply to
    `HostSignBegin` says so). A chunk out of order is `BadRequest` and the upload is kept.
 3. `HostSignCommit`. The blob is parsed and checked: the chain matches; **every listed
-   key is strictly below an account path shown this session on that chain**; an EVM
+   key is strictly below an account path shown this session on that chain, or is a key
+   whose address was shared by its path there**; an EVM
    request lists exactly one key; a Solana key is hardened throughout. Any failure is
    `Refused` + reason and drops the upload. Otherwise the question is queued.
 
@@ -1315,6 +1380,78 @@ Solana   [u8 kind = 4][u8 n][n × ([u8 signer slot][64-byte signature])][u32 len
 The PSBT goes back in the version it arrived in. The network transaction is present
 (non-empty) only when every input is complete and it finalised; a proof of reserves
 never carries one. The Solana transaction has the signatures already in their slots.
+
+#### Signing a message
+
+`HostSignMessage` carries the whole request in one sealed record:
+
+```text
+[u8 version = 1][u8 chain][u8 format][u8 scheme]
+[path]                       the one key that signs
+[u16 length][message]        1..=960 bytes; nothing may follow
+```
+
+| `scheme` | | chain | `format` | the result's signature |
+|---|---|---|---|---|
+| 1 | BIP-137 legacy, "Bitcoin Signed Message" | Bitcoin | P2PKH, P2SH-P2WPKH, P2WPKH | base64 of the 65 bytes |
+| 2 | BIP-322 simple | Bitcoin | P2WPKH, P2TR | base64 of the witness stack |
+| 3 | BIP-322 full | Bitcoin | P2SH-P2WPKH, P2WPKH, P2TR | base64 of the `to_sign` transaction |
+| 4 | EIP-191 `personal_sign` | Ethereum | EVM | 65 raw bytes `r \|\| s \|\| v`, `v` 27 or 28 |
+
+Checked in the USB task, before anything reaches a screen, and `Refused` + reason on any
+failure: the chain signs messages in this build ("Solana messages cannot be signed here"
+-- Bitcoin everywhere; Ethereum on a multichain build that is not the mk3; nothing else);
+the scheme and the format fit the chain and each other; **the key is one this session was
+shown**, under a shared account or by its own path; and the message is text the screen
+shows faithfully. For Bitcoin that is what Sign → Message takes: one line of printable
+ASCII, at most 240 characters. For EIP-191 it is printable ASCII in at most 24 lines, no
+line beginning or ending in a space and no blank first or last line
+(`catcard_evm::personal::text`) -- enough for a sign-in statement, and nothing a screen
+would swallow. Typed data (EIP-712) is not this and is not signed.
+
+On the device: "Computer asks you to sign a <chain> message", then the scheme's review --
+the message, "will be signed by", the address, the path, and how. For Bitcoin it is
+`signmsg`'s own confirmation and its own self-check (the legacy signature is recovered
+and compared, a BIP-322 one is run through the verifier). For EIP-191 the message is laid out a line
+to a line, a message the panel cannot hold whole is refused ("too long to show here")
+rather than shown cut, and the signature is recovered and compared with the signing key
+before it is handed back.
+
+The result:
+
+```text
+[u8 kind = 6][u8 version = 1][u8 chain][u8 scheme]
+[path]
+[u8 len][address, ASCII]     the address the signature speaks for
+[u16 len][signature]
+```
+
+**An EIP-191 signature cannot be a transaction's.** What is hashed begins with `0x19`,
+which is neither an RLP list nor a typed envelope; `personal`'s tests pin it. The device
+never signs a digest a host supplies.
+
+`tools/usbclient.py hid --sign-message "text" --key m/84h/0h/0h/0/3 [--chain btc]
+[--format p2wpkh] [--scheme bip137|bip322|bip322-full|eip191]` asks for the key's address
+first (the key has to have been shared), then for the signature. `@file` reads the
+message from a file.
+
+#### What this build answers: `HostInfo`
+
+No payload, no question, and answered whatever else is in hand, locked or not:
+
+```text
+[u8 version = 1][u8 features][u8 session][u16 longest message][u8 count]
+count × [u8 chain][u8 can][u8 n][n × u8 format]
+```
+
+`features`: bit 0 `HostAddressAt`, bit 1 `HostSignMessage`. `session`: bit 0 the person
+ticked "Allow during session"; bit 1 something has been shared, so a sign request has
+keys it may name. Then every chain in the build, with what it can be asked for -- `can`
+bit 0 addresses, bit 1 transaction signatures, bit 2 message signatures -- and its
+address formats, most usual first. Nothing in it is the wallet's: it is the same for
+every wallet on that firmware, apart from the two session bits.
+
+`tools/usbclient.py hid --host-info` prints it.
 
 #### Polling and paging
 
@@ -1361,8 +1498,16 @@ handshakes are dropped unrevealed -- see "Attempts are limited" in the channel s
 What pairing does **not** defend against is a computer that is itself compromised: it
 holds a genuine paired session. What protects the owner then is the same as for every
 other signing path: the review shows what the device parsed -- the amounts, the
-destinations, the fee, the signing address -- never what the host said it means, and only
-keys under accounts the person chose to share in this session can sign at all.
+destinations, the fee, the signing address, a message's own text -- never what the host
+said it means, and only keys the person chose to share in this session, by account or by
+path, can sign at all.
+
+"Allow during session" is the one place the owner hands such a computer something ahead
+of time, and it is worth being exact about what: the public key and address at any path
+it cares to name, one at a time, each costing a derivation on the device. That is enough
+to learn which addresses are this wallet's -- a privacy loss, the same one sharing an
+account's extended key is, without the chain code that would let the host derive them
+offline. It is not a signature and cannot become one.
 
 `tools/usbclient.py hid --addresses` and
 `tools/usbclient.py hid --sign FILE --chain btc|evm|sol --key m/84h/0h/0h/0/3 [--key ...]
