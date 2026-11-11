@@ -218,7 +218,7 @@ dependencies = [
  "catcard-upgrade",
  "catcard-usb",
  "catcard-wallet",
- "compcol 0.7.2",
+ "compcol 0.8.0",
  "cortex-m",
  "cortex-m-rt",
  "fstool",
@@ -257,7 +257,7 @@ dependencies = [
  "catcard-board",
  "catcard-fwhdr",
  "clap",
- "compcol 0.7.2",
+ "compcol 0.8.0",
  "hex",
  "outscript",
  "purecrypto",
@@ -297,7 +297,7 @@ dependencies = [
 name = "catcard-png"
 version = "7.0.0"
 dependencies = [
- "compcol 0.7.2",
+ "compcol 0.8.0",
 ]
 
 [[package]]
@@ -370,7 +370,7 @@ version = "7.0.0"
 dependencies = [
  "catcard-board",
  "catcard-entropy",
- "compcol 0.7.2",
+ "compcol 0.8.0",
  "heapless",
  "zeroize",
 ]
@@ -383,7 +383,7 @@ dependencies = [
  "catcard-flash",
  "catcard-fwhdr",
  "catcard-sign",
- "compcol 0.7.2",
+ "compcol 0.8.0",
 ]
 
 [[package]]
@@ -466,9 +466,15 @@ checksum = "f6f29da98742f258743e8bb44b09f0cc1cbca2591e709b1bb85ccd6e9111f431"
 
 [[package]]
 name = "compcol"
-version = "0.7.2"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "971c6ed76a2a81874d4d3e398e214df01ed1d2355cdc772bc26f16027c383cea"
+checksum = "fbe9a1760292869e621e78fe025e3588acfbf29b2947758aacd2eb31cc179dd3"
+
+[[package]]
+name = "compcol"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4be160df80e77bdf4902bb026c6a0f6c700ec7793379c26305d45e293e17b8c"
 
 [[package]]
 name = "cortex-m"
@@ -641,7 +647,7 @@ version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35537728a6fcdf5a83b4a98eeb4a821dfe7fb8015a89945a52647a7b2d69a155"
 dependencies = [
- "compcol 0.7.2",
+ "compcol 0.7.9",
 ]
 
 [[package]]

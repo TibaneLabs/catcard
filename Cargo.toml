@@ -118,7 +118,7 @@ evmabiless = { version = "0.1.17", default-features = false, features = ["decode
 # picture arrived whole), the baked art, and apps unpacked from the image. The
 # compressor is in the same module; firmware never calls it, so LTO leaves it out, and
 # the host tools and tests use it to build what the device reads.
-compcol = { version = "0.7.2", default-features = false, features = ["embed", "deflate", "zlib"] }
+compcol = { version = "0.8.0", default-features = false, features = ["embed", "deflate", "zlib"] }
 catcard-sd = { path = "crates/catcard-sd" }
 catcard-log = { path = "crates/catcard-log" }
 catcard-entropy = { path = "crates/catcard-entropy", default-features = false }
@@ -143,6 +143,15 @@ heapless = { version = "0.9.3", features = ["zeroize"] }
 # 0.9.3 puts the P-256 fixed-base comb table behind `p256-table`. **Leave it off**: it
 # is about 60 KB of flash, and the security key (`catcard-fido`) signs a handful of
 # times per login, where the table-less ladder costs a fraction of a second.
+#
+# **Held at 0.9.9: 0.10.5 does not fit.** Measured 2026-11-11 on the mk5 multichain image
+# at `opt-level = "z"`: `.text` 1,192,928 -> 1,298,192 bytes, +105 KB, of which purecrypto
+# itself is +78 KB (curve25519 `mul_base`, `x25519` and the portable scalar ladder about
+# +54 KB between them, SHA-512 +7.5 KB, RIPEMD-160 +4 KB, Keccak +4 KB) and outscript
+# +21 KB (ed25519 `is_on_curve`, the same field code inlined). No board links with it at
+# the levels the Makefile builds them: Q1 over by 73 KB, mk3 by 109 KB, mk5 by 115 KB.
+# `outscript` (0.2.7 on) and `tsslib` (0.2.16 on) need purecrypto 0.10, so they stay
+# where they are with it. Bump the three together once purecrypto has a small build.
 purecrypto = { version = "0.9.9", default-features = false }
 # --- tsslib: threshold signing, our own crate (docs/TSS.md) ---
 #
