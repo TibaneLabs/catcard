@@ -64,7 +64,7 @@ pub fn staged(area: &mut Area, len: u32, max: u32) -> Result<u32, &'static str> 
         chunk.bytes(),
     )
     .map_err(|why| {
-        crate::catlog!("inflate: refused: {:?}", why);
+        crate::catlog!("inflate: refused: {}", crate::logbuf::Dbg(&why));
         match why {
             catcard_upgrade::expand::Error::WindowTooSmall => "compressed with too wide a window",
             catcard_upgrade::expand::Error::TooLong => "it expands to more than can be staged",

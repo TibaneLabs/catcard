@@ -83,16 +83,9 @@ pub(crate) fn pressed_keys(
     // Idle the matrix for edge detection during the caller's wait before the next scan.
     matrix.arm_edge_detect();
 
-    if let Some(k) = crate::usbtask::take_injected_key() {
-        let _ = out.push(k);
-    }
-
     // Any key at all restarts the idle timeout's quiet period. Here rather than in each
     // screen because this is the single funnel every keypad read goes through, so there
     // is no screen whose keys quietly fail to count as someone being present.
-    //
-    // A host-injected key counts too: a host driving the UI is a session in use, and a
-    // device that logged out underneath one would be a bench unit that cannot be driven.
     if !out.is_empty() {
         crate::idle::note_key();
     }
@@ -524,7 +517,6 @@ pub fn show_nickname(
     let _ = doc.push(Line::body(hint.as_str()).small());
     let view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
     display::draw(panel, |c| render(c, &view));
-    crate::catlog!("nick: drawn, {} px of content", view.content_height());
 
     let mut pad = Keypad::new();
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
@@ -540,17 +532,14 @@ pub fn show_nickname(
 
     // Bounded, as every wait here is: five minutes is far longer than anyone stands in
     // front of a device, and a keypad that has failed must cost the screen, not the boot.
-    let mut waited = 0u32;
     for _ in 0..30_000 {
         let _ = crate::usbtask::pump();
         pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         if !keys.is_empty() {
             break;
         }
-        waited += 1;
         catcard_hal::dwt::delay_cycles(10 * per_ms);
     }
-    crate::catlog!("nick: dismissed after {} ms", waited * 10);
 }
 
 fn screen_message(panel: &mut display::Panel, head: &str, a: &str, b: &str) {
@@ -783,6 +772,8 @@ fn wait_for_confirm(matrix: &mut GpioMatrix, drbg: &mut HmacDrbg) -> bool {
 /// [`MAX_PART_LEN`] long -- the same shape [`PinBuffer`] would have produced from the
 /// keypad, so the gate hashes exactly what a typed PIN would, and no host can hand this
 /// device a PIN part stock firmware could not type.
+// Only the recovery loop takes a PIN from a host.
+#[cfg(feature = "usb-recovery")]
 pub(crate) fn split_pin(pin: &[u8]) -> Option<(&[u8], &[u8])> {
     let sep = pin.iter().position(|&b| b == catcard_pin::SEPARATOR)?;
     let (prefix, rest) = pin.split_at(sep);
@@ -1193,27 +1184,6 @@ pub fn unlock(
 
         let _ = crate::usbtask::pump();
 
-        // A host may submit the whole PIN over USB instead of typing it key by key
-        // (bring-up only; see `Opcode::UnlockPin`). Drive it through the same state
-        // machine a person does, auto-confirming the anti-phishing words -- the host
-        // has chosen to trust the device it is talking to. A blank device needs setup,
-        // not this, and one already in is left alone.
-        if let Some(pin) = crate::usbtask::take_unlock_pin()
-            && !matches!(login.step(), Step::Blank | Step::In { .. })
-        {
-            // From a wrong-PIN screen, reset to a fresh prefix before applying.
-            if !matches!(login.step(), Step::Prefix) {
-                login = Login::new(&g);
-            }
-            if let (Step::Prefix, Some((prefix, suffix))) = (login.step(), split_pin(&pin)) {
-                let _busy = working(panel, "USB unlock");
-                login_with(&g, &mut login, prefix, suffix);
-                field.clear();
-            }
-            redraw = true;
-            continue;
-        }
-
         pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         // Solid again from the moment a key goes in: a caret that happened to be
         // blinked out as a digit landed reads as a key the device did not take.
@@ -1611,20 +1581,6 @@ fn calculator_login(
         }
 
         let _ = crate::usbtask::pump();
-        // A host-submitted PIN, as on the PIN pad; not during a test.
-        if !test && let Some(pin) = crate::usbtask::take_unlock_pin() {
-            if !matches!(login.step(), Step::Prefix) {
-                *login = Login::new(g);
-            }
-            if let (Step::Prefix, Some((prefix, suffix))) = (login.step(), split_pin(&pin)) {
-                let _busy = working(panel, "USB unlock");
-                login_with(g, login, prefix, suffix);
-                line.clear();
-            }
-            redraw = true;
-            continue;
-        }
-
         pressed_keys(&mut pad, matrix, drbg, &mut events, &mut keys);
         if !keys.is_empty() {
             caret = true;

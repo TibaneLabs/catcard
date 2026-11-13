@@ -252,7 +252,11 @@ pub(crate) fn review(
                 signed += 1;
                 done = true;
             }
-            Err(e) => crate::catlog!("proof: input {} not a seed key: {:?}", index, e),
+            Err(e) => crate::catlog!(
+                "proof: input {} not a seed key: {}",
+                index,
+                crate::logbuf::Dbg(&e)
+            ),
         }
         #[cfg(not(feature = "board-mk3"))]
         if !done {
@@ -316,11 +320,6 @@ pub(crate) fn review(
             {
                 out.refuse(why);
             }
-            crate::catlog!(
-                "proof: {} of {} inputs, for the computer",
-                signed,
-                proof.inputs
-            );
             return;
         }
         Sink::Files { dest, storage } => (*dest, *storage),
@@ -335,12 +334,6 @@ pub(crate) fn review(
         menu::wait_for_any_key(ui);
         return;
     }
-    crate::catlog!(
-        "proof: {} of {} inputs signed, {} bytes",
-        signed,
-        proof.inputs,
-        at
-    );
 
     // Every input ours and signed: finish it, check it as a counterparty would, and write
     // the proof. Otherwise the signed PSBT is what goes on to whoever signs next.
@@ -365,7 +358,7 @@ pub(crate) fn review(
         Ok(bip322::Variant::Proof { utxos, total })
             if utxos == proof.utxos && total == proof.total => {}
         other => {
-            crate::catlog!("proof: self-check failed: {:?}", other);
+            crate::catlog!("proof: self-check failed: {}", crate::logbuf::Dbg(&other));
             menu::message(
                 ui.panel,
                 "Signed",
@@ -401,7 +394,6 @@ pub(crate) fn review(
     let name = proof_name(dest.final_name);
     match menu::write_storage_file(storage, &name, &from[..file_len]) {
         Ok(()) => {
-            crate::catlog!("proof: {} written, {} UTXO(s)", name.as_str(), proof.utxos);
             let _ = write!(note, "{} UTXO(s), nothing spent", proof.utxos);
             menu::message(ui.panel, "Proof written", strip_slash(&name), &note);
         }
@@ -522,7 +514,6 @@ fn strip_slash(name: &str) -> &str {
 }
 
 fn say(ui: &mut Ui<'_>, why: &str) {
-    crate::catlog!("proof: {}", why);
     menu::message(ui.panel, HEAD, why, "any key to go back");
     menu::wait_for_any_key(ui);
 }

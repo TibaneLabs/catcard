@@ -109,11 +109,13 @@ pub(crate) fn load_keys(
                 Ok(k) => {
                     let _ = out.push(k);
                 }
-                Err(why) => crate::catlog!("wifstore: skipping a stored key: {:?}", why),
+                Err(why) => crate::catlog!(
+                    "wifstore: skipping a stored key: {}",
+                    crate::logbuf::Dbg(&why)
+                ),
             }
         }
     });
-    crate::catlog!("wifstore: {} stored key(s)", out.len());
     out.len()
 }
 
@@ -292,7 +294,6 @@ fn export_all(ui: &mut Ui<'_>, entries: &[WifEntry<'_>]) {
     text.zeroize();
     match result {
         Ok(()) => {
-            crate::catlog!("wifstore: {} key(s) exported", entries.len());
             say(ui, &EXPORT_FILE[1..]);
         }
         Err(why) => say(ui, why),
@@ -545,7 +546,6 @@ fn descriptors(ui: &mut Ui<'_>, pubkey: &[u8; 33]) {
     menu::card_wait(ui.panel, DESC_HEAD, "writing");
     match menu::write_storage_file(storage, DESC_FILE, text.as_bytes()) {
         Ok(()) => {
-            crate::catlog!("wifstore: descriptors written");
             menu::message(ui.panel, DESC_HEAD, &DESC_FILE[1..], "any key to go back");
             menu::wait_for_any_key(ui);
         }

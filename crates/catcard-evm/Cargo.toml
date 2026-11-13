@@ -29,3 +29,6 @@ full-signatures = ["evmabiless/signatures"]
 evmabiless = { workspace = true }
 # Keccak-256, for the hash a signature is made over.
 outscript = { workspace = true }
+# Keccak-256 fed a piece at a time, for typed data (EIP-712): a struct is hashed field by
+# field, with no buffer the size of the whole. Already in every image through `outscript`.
+purecrypto = { workspace = true, features = ["hash"] }

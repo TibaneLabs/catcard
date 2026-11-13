@@ -546,7 +546,6 @@ pub(crate) fn sign_psbt(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mu
             return;
         }
     };
-    crate::catlog!("sign: {} bytes from {}", len, path.as_str());
 
     review_and_sign(
         gate,
@@ -653,7 +652,6 @@ pub(crate) fn batch_sign(gate: &Callgate, login: &mut catcard_pin::Login, ui: &m
         menu::wait_for_any_key(ui);
         return;
     }
-    crate::catlog!("batch: {} transaction(s) to sign", list.len());
 
     let mut work = match Workspace::take() {
         Ok(w) => w,
@@ -856,12 +854,11 @@ fn review_and_sign_here(
         let head: &[u8] = &head[..len];
         match v0_view(head, tail) {
             Ok(n) => {
-                crate::catlog!("sign: PSBT v2, {} bytes as its v0 view", n);
                 original_v2 = Some(head);
                 (tail, n)
             }
             Err(e) => {
-                crate::catlog!("sign: psbt v2 refused: {:?}", e);
+                crate::catlog!("sign: psbt v2 refused: {}", crate::logbuf::Dbg(&e));
                 sink.refuse(v2_error_text(e));
                 menu::message(ui.panel, HEAD, v2_error_text(e), "any key to go back");
                 menu::wait_for_any_key(ui);
@@ -883,7 +880,7 @@ fn review_and_sign_here(
     let psbt = match Psbt::parse(&buf[..len]) {
         Ok(p) => p,
         Err(e) => {
-            crate::catlog!("sign: psbt refused: {:?}", e);
+            crate::catlog!("sign: psbt refused: {}", crate::logbuf::Dbg(&e));
             sink.refuse(parse_error_text(e));
             menu::message(ui.panel, HEAD, parse_error_text(e), "any key to go back");
             menu::wait_for_any_key(ui);
@@ -1024,7 +1021,7 @@ fn review_and_sign_here(
     let summary = match summary {
         Ok(s) => s,
         Err(r) => {
-            crate::catlog!("sign: refused: {:?}", r);
+            crate::catlog!("sign: refused: {}", crate::logbuf::Dbg(&r));
             sink.refuse(refusal_text(r));
             menu::message(ui.panel, HEAD, refusal_text(r), "any key to go back");
             menu::wait_for_any_key(ui);
@@ -1220,7 +1217,11 @@ fn review_and_sign_here(
                 done = true;
             }
             Err(e) => {
-                crate::catlog!("sign: input {} not a seed key: {:?}", index, e);
+                crate::catlog!(
+                    "sign: input {} not a seed key: {}",
+                    index,
+                    crate::logbuf::Dbg(&e)
+                );
             }
         }
         // A stored WIF key next, if the seed did not sign this input. Each key signs only
@@ -1295,7 +1296,11 @@ fn review_and_sign_here(
                     at = n;
                     cosigned += 1;
                 }
-                Err(e) => crate::catlog!("sign: input {} not key C's: {:?}", index, e),
+                Err(e) => crate::catlog!(
+                    "sign: input {} not key C's: {}",
+                    index,
+                    crate::logbuf::Dbg(&e)
+                ),
             }
         }
         busy.tick(ui.panel);
@@ -1350,7 +1355,6 @@ pub(crate) fn deliver(
                 crate::catlog!("sign: result not handed back: {}", why);
                 out.refuse(why);
             }
-            crate::catlog!("sign: {} of {} inputs, for the computer", signed, signable);
             return;
         }
         Sink::Files { dest, storage } => (*dest, *storage),
@@ -1438,8 +1442,8 @@ pub(crate) fn deliver(
     }
     match finalise(&from[..at], into) {
         Some(len) => {
-            let hex_len = match write_hex_file(storage, dest.final_name, &into[..len], from) {
-                Ok(n) => n,
+            match write_hex_file(storage, dest.final_name, &into[..len], from) {
+                Ok(_) => {}
                 Err(why) => {
                     crate::catlog!("sign: final tx not written: {}", why);
                     menu::message(
@@ -1452,7 +1456,6 @@ pub(crate) fn deliver(
                     return;
                 }
             };
-            crate::catlog!("sign: finalised, {} bytes of hex", hex_len);
             menu::message(
                 ui.panel,
                 "Signed",
@@ -1476,7 +1479,6 @@ pub(crate) fn deliver(
                 note.as_str(),
             );
             if needs > 0 {
-                crate::catlog!("sign: {} more signature(s) needed", needs);
                 menu::wait_for_any_key(ui);
                 menu::message(
                     ui.panel,

@@ -117,8 +117,11 @@ pub enum Opcode {
     /// yet confirmed on hardware is the only way onto a device that has a PIN, and a
     /// wrong mapping costs thirteen attempts and then the secure element.
     ///
-    /// It is behind the `usb-key-injection` feature, reported by [`Opcode::Identify`],
-    /// and shown on the device's own screen. See `docs/USB.md`.
+    /// Answered only by a bench build's recovery loop (the `usb-recovery` feature: hold
+    /// CANCEL at power-on, or a device that cannot run its front panel), where it is the
+    /// yes or no to an install. An ordinary session answers `UnknownOpcode`, and
+    /// [`Opcode::Identify`] reports the capability only while that loop runs. See
+    /// `docs/USB.md`.
     InjectKey = 0x0020,
     /// Unlock the device by submitting the PIN whole, instead of typing it key by key.
     ///
@@ -128,7 +131,8 @@ pub enum Opcode {
     /// means only that the request was *accepted*; the host polls [`Opcode::Identify`]
     /// for the `UNLOCKED` state bit to learn whether the PIN was right.
     ///
-    /// Same trust boundary and same `usb-key-injection` feature as [`Opcode::InjectKey`]:
+    /// Same trust boundary, same `usb-recovery` feature and same recovery loop only as
+    /// [`Opcode::InjectKey`]:
     /// a host that can type a PIN blindly can send one whole. It **auto-confirms the
     /// anti-phishing words**, so it is a bring-up convenience for driving upgrades, not
     /// a path that preserves the substituted-device check a person performs.
@@ -402,7 +406,7 @@ pub mod caps {
     /// to a build that will read its own RAM out to anyone.
     pub const DEBUG_MEM: u8 = 1 << 2;
     /// This build accepts [`Opcode::UnlockPin`](super::Opcode::UnlockPin). Set exactly
-    /// when `KEY_INJECTION` is: the two share the `usb-key-injection` feature.
+    /// when `KEY_INJECTION` is: the two share the `usb-recovery` feature.
     pub const UNLOCK_PIN: u8 = 1 << 3;
     /// This build accepts [`Opcode::UpgradePacked`](super::Opcode::UpgradePacked), a
     /// deflated image. Never set without [`UPGRADE`]: it is the same staging area

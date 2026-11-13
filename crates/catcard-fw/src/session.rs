@@ -311,7 +311,6 @@ fn prime_session(gate: &Callgate, login: &mut catcard_pin::Login, panel: &mut di
                 let fp = crate::keywork::run(|kw| master.fingerprint(kw));
                 drop(master);
                 crate::pubkeys::note_fingerprint(Some(fp));
-                crate::catlog!("wallet: fingerprint primed from the login fetch");
             }
             Err(why) => crate::catlog!("wallet: no primed fingerprint: {}", why),
         }
@@ -391,7 +390,7 @@ pub(crate) fn would_be_refused(
 ) -> bool {
     // SAFETY: the documented 8-byte buffer; a check, which writes nothing; masked.
     let check = unsafe { gate.is_downgrade(&a.header.timestamp) };
-    crate::catlog!("upgrade: downgrade check {:?}", check);
+    crate::catlog!("upgrade: downgrade check {}", crate::logbuf::Dbg(&check));
     matches!(check, Ok(true))
 }
 

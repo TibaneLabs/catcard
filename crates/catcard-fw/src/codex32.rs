@@ -450,7 +450,6 @@ fn activate(
             if !loaded {
                 return say(ui, head, "cannot use it:", "not a usable key");
             }
-            crate::catlog!("codex32: {} in force for the session", hrp.text());
             menu::announce_key(gate, login, ui, head, was);
         }
     }
@@ -514,17 +513,13 @@ fn store(
         // Best effort: the flag only steers a later split's prefix, which this firmware
         // reads from the stash anyway. Source: hw-reference/settings-nvstore-format.md
         // §5 `c32` [C]
-        let saved = save(
+        let _ = save(
             gate,
             login,
             ui,
             head,
             catcard_settings::codex32::RAW_KEY,
             "true",
-        );
-        crate::catlog!(
-            "codex32: c32 flag {}",
-            if saved { "saved" } else { "not saved" }
         );
     }
     say(ui, "Wallet stored", "it is the master now", "");
@@ -675,17 +670,13 @@ fn collect(
         }
     }
     if had_saved {
-        let cleared = save(
+        let _ = save(
             gate,
             login,
             ui,
             head,
             catcard_settings::codex32::SHARES_KEY,
             "[]",
-        );
-        crate::catlog!(
-            "codex32: saved set {}",
-            if cleared { "cleared" } else { "NOT cleared" }
         );
     }
     // Said before the result is used, because the result cannot say it.
@@ -731,7 +722,10 @@ fn resume(
             let parsed = crate::keywork::run(|kw| Share::parse(s, kw));
             match parsed.and_then(|share| set.add(share)) {
                 Ok(_) => {}
-                Err(e) => crate::catlog!("codex32: a saved share was skipped: {:?}", e),
+                Err(e) => crate::catlog!(
+                    "codex32: a saved share was skipped: {}",
+                    crate::logbuf::Dbg(&e)
+                ),
             }
         }
     }
@@ -1004,6 +998,5 @@ fn split(
         show(ui, &title, &share, true);
     }
     drop(set);
-    crate::catlog!("codex32: split {}-of-{} as {}", k, n, hrp.text());
     say(ui, SPLIT, "all shares shown", "nothing was stored");
 }

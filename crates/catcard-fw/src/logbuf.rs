@@ -72,6 +72,8 @@ pub struct LogBuf {
 /// buffer on the caller's own stack with interrupts on, and only the copy into the ring
 /// happens with them masked. Formatting inside the critical section would have made every
 /// log call a blackout of its own.
+// Never inlined: there are several hundred callers.
+#[inline(never)]
 pub fn write_fmt(args: fmt::Arguments<'_>) {
     let mut line = Line::new();
     let _ = line.write_fmt(args);
@@ -162,6 +164,32 @@ impl Write for Line {
             self.cut = true;
         }
         Ok(())
+    }
+}
+
+/// An error or a state, for a log line: `{}` with `Dbg(&e)` where `{:?}` with `e` would go.
+///
+/// A bench build (`dev`) writes the value's `Debug` form. A release writes `?`: every
+/// `Debug` impl a log line names is otherwise code and variant names in the image --
+/// about 14 KB of them, when the Q1 release had 1.5 KB too few (2026-11-13). The words
+/// around the value say what failed; which variant it was is what a release gives up,
+/// and a bench build of the same commit gets back.
+///
+/// Not for a value the line exists to report -- a number, a setting, a name. Those keep
+/// `{:?}`, or better `{}`.
+pub struct Dbg<'a, T: ?Sized>(pub &'a T);
+
+#[cfg(feature = "dev")]
+impl<T: ?Sized + fmt::Debug> fmt::Display for Dbg<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.0, f)
+    }
+}
+
+#[cfg(not(feature = "dev"))]
+impl<T: ?Sized> fmt::Display for Dbg<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("?")
     }
 }
 

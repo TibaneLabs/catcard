@@ -242,7 +242,6 @@ pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
 
     match outcome {
         Ok((name, left_out)) => {
-            crate::catlog!("backup: wrote {}", name.as_str());
             // Say when the preferences did not fit. The wallet is in there either way,
             // but "your settings are not in this file" is not something to find out
             // when the backup is the only copy left. And a cleartext file is named as
@@ -646,12 +645,9 @@ fn open_backup(ui: &mut Ui<'_>, head: &str, scratch: &mut Scratch) -> Option<usi
     };
 
     let got = match found {
-        sevenz::Found::Clear(plain) => {
-            crate::catlog!("backup: the file is cleartext");
-            sevenz::extract_in_place(&mut scratch.0[..len], &plain)
-                .map(|b| b.len())
-                .map_err(describe)
-        }
+        sevenz::Found::Clear(plain) => sevenz::extract_in_place(&mut scratch.0[..len], &plain)
+            .map(|b| b.len())
+            .map_err(describe),
         sevenz::Found::File(_) | sevenz::Found::Header(_) => {
             let phrase = ask_password(ui)?;
             open_body(ui, &mut scratch.0, len, found, phrase.as_str(), head)
@@ -801,7 +797,6 @@ pub(crate) fn restore(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut 
 
     match apply(gate, login, ui, &scratch.0[..body_len]) {
         Ok(what) => {
-            crate::catlog!("backup: restored {}", what);
             menu::message(ui.panel, "Wallet restored", what, "from the backup");
         }
         Err(why) => menu::message(ui.panel, "Not restored", why, "any key to go back"),
@@ -894,7 +889,6 @@ pub(crate) fn verify(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         Some(_) => "NOT the wallet in force",
         None => "no wallet here to compare",
     };
-    crate::catlog!("backup: verified: {}; {} settings", verdict, settings);
     menu::message(ui.panel, "Backup opens", &xfp, verdict);
     menu::wait_for_any_key(ui);
 
@@ -1198,7 +1192,6 @@ pub(crate) fn clone_export(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
     secret.zeroize();
     match outcome {
         Ok(name) => {
-            crate::catlog!("clone: wrote {}", name.as_str());
             menu::message(
                 ui.panel,
                 "Clone written",
@@ -1308,11 +1301,9 @@ pub(crate) fn clone_import(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
         return;
     }
     menu::card_wait(ui.panel, CLONE_HEAD, "writing the start file");
-    let start_name = match menu::write_card_export(CLONE_START_FILE, &start[..], None) {
-        Ok(n) => n,
-        Err(why) => return say(ui, "Cannot write", why),
-    };
-    crate::catlog!("clone: start file {}", start_name.as_str());
+    if let Err(why) = menu::write_card_export(CLONE_START_FILE, &start[..], None) {
+        return say(ui, "Cannot write", why);
+    }
 
     menu::message(
         ui.panel,
@@ -1351,7 +1342,6 @@ pub(crate) fn clone_import(gate: &Callgate, login: &mut catcard_pin::Login, ui: 
 
     match apply(gate, login, ui, &scratch.0[..body_len]) {
         Ok(what) => {
-            crate::catlog!("clone: imported {}", what);
             menu::message(ui.panel, "Wallet cloned", what, "from the other device");
         }
         Err(why) => menu::message(ui.panel, "Not cloned", why, "any key to go back"),

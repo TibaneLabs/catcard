@@ -160,8 +160,6 @@ fn set(on: bool, announce: bool) {
         Some(rate) => [rate, 0],
         None => catcard_qr::BAUDS,
     };
-    let mut woke = 0u32;
-    let mut answered = "silence";
     for rate in rates {
         if rate == 0 {
             continue;
@@ -171,9 +169,7 @@ fn set(on: bool, announce: bool) {
         // not, and the only difference between the two paths was this: the module had
         // been woken before one and not the other. Waking something already awake costs
         // one command it answers immediately.
-        if wake(port) {
-            woke = rate;
-        }
+        let _ = wake(port);
         // Framed, and framed only: bare is for the sleep and wake pokes, and raw ASCII
         // at a module expecting a frame is as likely to desynchronise its parser as to
         // be understood.
@@ -186,16 +182,9 @@ fn set(on: bool, announce: bool) {
         let _ = port.write(frame, ms_cycles(WIRE_MS));
         // Give it time to answer before deciding it did not: see `REPLY_MS`.
         catcard_hal::dwt::delay_cycles(ms_cycles(REPLY_MS));
-        // What comes back is the whole diagnosis: an acknowledgement means the command
-        // landed and an unlit lamp is the module's business, silence means it did not.
+        // Take whatever it answers off the wire, so the next command starts clean.
         let mut reply = [0u8; 16];
-        let n = port.read_reply(&mut reply, ms_cycles(ACK_MS), ms_cycles(WIRE_MS));
-        answered = match catcard_qr::unwrap(&reply[..n]) {
-            Ok(f) if catcard_qr::is_ack(&f) => "ack",
-            Ok(_) => "a frame, but not an ack",
-            Err(_) if n > 0 => "bytes, but not a frame",
-            Err(_) => "silence",
-        };
+        let _ = port.read_reply(&mut reply, ms_cycles(ACK_MS), ms_cycles(WIRE_MS));
     }
     if !on {
         // Only after the lamp has been told to go out, and answered. Sleeping on top of
@@ -214,14 +203,7 @@ fn set(on: bool, announce: bool) {
     // Edges only. The lamp is re-asserted four times a second while the key is held --
     // otherwise the module's idle timer puts it out -- and logging that buries every
     // other line in the log under a key nobody was even pressing hard.
-    if announce {
-        crate::catlog!(
-            "torch: {} -> {} (woke at {})",
-            if on { "on" } else { "off" },
-            answered,
-            woke
-        );
-    }
+    if announce {}
 }
 
 /// Wake the module, retrying as the reference says to.

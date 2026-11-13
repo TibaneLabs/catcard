@@ -413,7 +413,6 @@ pub(crate) fn save_to_card(ui: &mut crate::ui::Ui<'_>, bytes: &[u8], what: Conte
     crate::menu::card_wait(ui.panel, HEAD, "writing to the card");
     match crate::menu::write_card_file(&path, bytes) {
         Ok(()) => {
-            crate::catlog!("qr: {} bytes saved as {}", bytes.len(), path.as_str());
             crate::menu::message(ui.panel, "Saved", &name, "on the card");
         }
         Err(why) => {

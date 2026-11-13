@@ -104,8 +104,8 @@ A `BadRequest` to a chunk carries one byte: `1` no six-byte header, `2` more pay
 
 - `state` bit 0 **UNLOCKED**: the PIN has been entered. Bit 1 BLANK: no PIN set yet.
 - `caps` bit 7 **PAIRING** and bit 6 **HOST_WALLET** are what the app needs; both are set
-  together on every normal boot. Bits 0 and 3 (key injection) and bit 2 (memory monitor)
-  mean a bench build that no owner should be using.
+  together on every normal boot. Bits 0 and 3 (a bench build in its USB recovery loop) and bit 2
+  (memory monitor) mean a bench build that no owner should be using.
 - `board` is `mk3`, `mk4`, `mk5` or `q1`; `version` is the firmware version string.
 
 Refuse to go on without protocol version 2 and both capability bits, and tell the person
@@ -265,7 +265,7 @@ count × [u8 chain][u8 can][u8 n][n × u8 format]
 ```
 
 `UnknownOpcode` means older firmware: §5 and §6 are all it has. Otherwise `features`
-bit 0 is `HostAddressAt` and bit 1 `HostSignMessage`; per chain, `can` bit 0 is
+bit 0 is `HostAddressAt`, bit 1 `HostSignMessage` and bit 2 typed data (§6a); per chain, `can` bit 0 is
 addresses, bit 1 transaction signing, bit 2 message signing, followed by the address
 formats the chain has. Use it to decide what to offer, rather than finding out by
 refusal. `session` bit 0 says the person has ticked "Allow during session" (below).
@@ -341,9 +341,11 @@ One request, `HostSignMessage` (`0x0057`):
 ```
 
 `scheme`: 1 BIP-137 legacy, 2 BIP-322 simple, 3 BIP-322 full (all Bitcoin; `format` is
-the address type the signature speaks for), 4 EIP-191 `personal_sign` (Ethereum,
-`format` 5). The key must have been shared this session. Bitcoin messages are one line
-of printable ASCII up to 240 characters; EIP-191 messages are printable ASCII in up to
+the address type the signature speaks for), 4 EIP-191 `personal_sign` and 6 EIP-712
+typed data (Ethereum, `format` 5), 5 TIP-191 `signMessageV2` (Tron, `format` 6), 7 and 8
+a Solana off-chain message, version 1 and version 0 (`format` 7, path hardened
+throughout). The key must have been shared this session. Bitcoin messages are one line
+of printable ASCII up to 240 characters; the others' text is printable ASCII in up to
 24 lines and 960 bytes, with no line starting or ending in a space. Anything else is
 `Refused` with the reason as text -- as is a message too long for that device's screen,
 which you learn only from the result, since it depends on the board.
@@ -356,9 +358,25 @@ result:
 [u8 len][address, ASCII][u16 len][signature]
 ```
 
-The signature is base64 text for the Bitcoin schemes (what a verifier pastes) and the 65
-bytes `r || s || v` for EIP-191 (hex-encode with `0x` for a web3 caller). There is no
-EIP-712 and no Solana or Tron message signing; `HostInfo` says so per chain.
+The signature is base64 text for the Bitcoin schemes (what a verifier pastes), the 65
+bytes `r || s || v` for EIP-191, TIP-191 and EIP-712 (hex-encode with `0x` for a web3 or
+TronWeb caller), and the 64 bytes for Solana.
+
+**Solana.** For scheme 7 send the text; the device signs the version-1 off-chain
+envelope around it, `"\xffsolana offchain" || 01 || 01 || signer || text`, with its own
+key as the one signer -- rebuild those bytes from the result's address to verify, or to
+hand a verifier the envelope. Scheme 8 is the version-0 envelope the Solana CLI makes:
+send `[32 application domain][u8 format 0 or 1][text]`. Neither is a bare signature over
+the text, which is what some browser wallets return from `signMessage`: a device that
+signed bare bytes could be handed a transaction.
+
+**Typed data.** For scheme 6 the message is not the JSON but its types and values
+re-encoded (docs/USB.md, "Typed data", has the layout; `typed_blob` in
+`tools/hostwallet.py` is short enough to port). Write the types in the order the
+JSON gives them, then the domain's values and the message's, and it must fit the 960
+bytes a message may be. The device shows every field and computes the digest itself;
+it does not take a hash. `HostInfo`'s `features` bit 2 says a build has it; a chain's
+`can` bit 2 says the chain signs messages at all.
 
 ## 7. Polling for the answer
 

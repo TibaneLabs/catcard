@@ -1030,7 +1030,10 @@ fn passkey_file(
         Some(n) => Passkeys::open(key, buf, n),
     };
     let mut list = opened.map_err(|e| {
-        crate::catlog!("fido: the passkey file will not open: {:?}", e);
+        crate::catlog!(
+            "fido: the passkey file will not open: {}",
+            crate::logbuf::Dbg(&e)
+        );
         FAIL
     })?;
     let changed = f(&mut list);

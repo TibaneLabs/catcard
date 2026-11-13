@@ -352,14 +352,11 @@ topic!(
     DEBUG = "Debug help",
     [
         "Nothing here is needed to use a wallet: these are for checking the device itself.",
-        "View TRNG Words: raw output of the random source as words -- to look at, not to keep.",
-        "NFC, Keyboard EMU, QR probe, Sweep test: exercise one part of the device and show what it did.",
-        "USB, Clocks, RTC, Kernel, memory rows, Boot report, Selftest: what the device reports about itself.",
-        "Keypad, Colours, Scroll test: check the keys and the screen.",
+        "Boot report, Selftest: what the device reports about itself.",
+        "TRNG startup test: the health test on every random source, run now.",
         "PRNG status, microSD, Logs, Save log: counters, the card, and the log.",
         "Warm Reset: restart the device. Factory Reset: clear the PIN and all settings.",
-        "Settings store, Settings to SD, Dump or Restore: bench copies of the settings.",
-        "Nickname screen, Secure notes: look at those screens as they are drawn.",
+        "Settings store, Settings to SD: bench copies of the settings.",
     ]
 );
 

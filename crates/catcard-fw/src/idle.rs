@@ -158,7 +158,6 @@ pub fn arm_battery_off(seconds: Option<u32>) {
         seconds.unwrap_or(0).saturating_mul(1_000),
         Ordering::Relaxed,
     );
-    crate::catlog!("idle: on battery, power off after {:?} s", seconds);
 }
 
 /// A progress bar moved: hold the on-battery power-off for the next minute.

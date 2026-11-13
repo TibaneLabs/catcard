@@ -247,7 +247,7 @@ fn install(
             crate::catlog!("reset: firmware not installed; the reset itself is done");
         }
         Err(why) => {
-            crate::catlog!("reset: commit refused: {:?}", why);
+            crate::catlog!("reset: commit refused: {}", crate::logbuf::Dbg(&why));
             menu::message(
                 ui.panel,
                 "Not installed",

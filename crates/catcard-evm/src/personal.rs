@@ -1,4 +1,5 @@
-//! Signing a message with an Ethereum key: EIP-191 `personal_sign`.
+//! Signing a message with an Ethereum key: EIP-191 `personal_sign`, and Tron's TIP-191,
+//! which is the same construction under another header.
 //!
 //! What a site asks for when it says "sign in with your wallet", and what a person is
 //! asked for as proof that an address is theirs. The digest is
@@ -10,6 +11,13 @@
 //! and the signature is the 65 bytes `r || s || v` with `v` 27 or 28.
 //!
 //! Source: EIP-191 "Signed Data Standard", version byte `0x45` (`E`) [C]. Public standard.
+//!
+//! Tron's is the same with `"TRON Signed Message:\n"` for the header ([`TRON_PREFIX`]),
+//! and the same 65 bytes for the signature: what TronWeb's `signMessageV2` makes and
+//! `verifyMessageV2` checks. Not the older `signMessage`, which signs a fixed "32" and a
+//! hash the person never sees.
+//!
+//! Source: TIP-191 "Signed Data Standard"; TronWeb `hashMessage` documentation [C].
 //!
 //! # Why it cannot move coins
 //!
@@ -30,6 +38,17 @@
 /// Source: EIP-191 [C]
 pub const PREFIX: &[u8] = b"\x19Ethereum Signed Message:\n";
 
+/// What a Tron message digest begins with.
+/// Source: TIP-191; TronWeb `hashMessage` (`"\x19TRON Signed Message:\n"`) [C]
+pub const TRON_PREFIX: &[u8] = b"\x19TRON Signed Message:\n";
+
+/// The longer of the two headers, for [`scratch_len`].
+const PREFIX_MAX: usize = if PREFIX.len() > TRON_PREFIX.len() {
+    PREFIX.len()
+} else {
+    TRON_PREFIX.len()
+};
+
 /// Longest message signed. Enough for a sign-in statement; bounded because the whole of
 /// it has to be read on a small screen before it is signed.
 pub const MAX_MESSAGE: usize = 960;
@@ -46,7 +65,7 @@ const _: () = assert!(MAX_MESSAGE < 1000);
 
 /// Bytes [`digest`] needs to lay a message of `len` bytes out in.
 pub const fn scratch_len(len: usize) -> usize {
-    PREFIX.len() + LEN_DIGITS + len
+    PREFIX_MAX + LEN_DIGITS + len
 }
 
 /// Why a message cannot be signed.
@@ -119,6 +138,11 @@ pub fn text(message: &[u8]) -> Result<&str, Unshowable> {
 /// Any bytes hash; whether they may be *signed* is [`text`]'s to say, and a caller signs
 /// only what it has shown.
 pub fn digest(message: &[u8], scratch: &mut [u8]) -> Option<[u8; 32]> {
+    digest_under(PREFIX, message, scratch)
+}
+
+/// [`digest`] under the header `prefix`: [`PREFIX`] or [`TRON_PREFIX`].
+pub fn digest_under(prefix: &[u8], message: &[u8], scratch: &mut [u8]) -> Option<[u8; 32]> {
     if message.len() > MAX_MESSAGE {
         return None;
     }
@@ -134,10 +158,10 @@ pub fn digest(message: &[u8], scratch: &mut [u8]) -> Option<[u8; 32]> {
         }
     }
     let digits = &digits[at..];
-    let total = PREFIX.len() + digits.len() + message.len();
+    let total = prefix.len() + digits.len() + message.len();
     let buf = scratch.get_mut(..total)?;
-    let (head, rest) = buf.split_at_mut(PREFIX.len());
-    head.copy_from_slice(PREFIX);
+    let (head, rest) = buf.split_at_mut(prefix.len());
+    head.copy_from_slice(prefix);
     let (len, body) = rest.split_at_mut(digits.len());
     len.copy_from_slice(digits);
     body.copy_from_slice(message);
@@ -192,6 +216,25 @@ mod tests {
         );
     }
 
+    // Computed the same way, under Tron's header.
+    #[test]
+    fn trons_digest_differs_only_in_the_header() {
+        let of = |m: &[u8]| {
+            let mut scratch = vec![0u8; scratch_len(m.len())];
+            hex(&digest_under(TRON_PREFIX, m, &mut scratch).unwrap())
+        };
+        assert_eq!(
+            of(b"hello world"),
+            "cf02daeb2bea196ed5692322a66ed50080ce74ff8cb711199f1b04f3c13bc10d"
+        );
+        assert_eq!(
+            of(b"a\nb"),
+            "25c631a24794571e85c37141eb7dfa3ba73701054df38ea256a4f65bbafac1df"
+        );
+        assert_ne!(of(b"hello world"), digest_of(b"hello world"));
+        assert_eq!(TRON_PREFIX[0], 0x19);
+    }
+
     #[test]
     fn the_length_is_decimal_and_counts_line_breaks() {
         // One digit, with a line break inside the three bytes.
@@ -212,7 +255,7 @@ mod tests {
         let mut scratch = vec![0u8; scratch_len(m.len())];
         assert!(digest(&m, &mut scratch).is_some());
         // Three digits of length are needed here, so two bytes fewer is too few.
-        let short = scratch_len(m.len()) - LEN_DIGITS + 2;
+        let short = PREFIX.len() + 2 + m.len();
         assert!(digest(&m, &mut scratch[..short]).is_none());
         // The longest message fits the scratch its length asks for.
         let long = vec![b'y'; MAX_MESSAGE];

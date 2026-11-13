@@ -90,14 +90,6 @@ pub struct Options {
     pub enter: bool,
 }
 
-/// Type `text` into the host, character by character, and press nothing after it.
-///
-/// Each character is one press report and one release report, paced [`PACE_MS`] apart.
-/// Returns once the host has taken the final release, so on `Ok` no key is left down.
-pub fn type_text(text: &str) -> Result<(), Error> {
-    type_text_with(text, Options::default())
-}
-
 /// [`type_text`], with a say in what follows the text.
 pub fn type_text_with(text: &str, opt: Options) -> Result<(), Error> {
     check(text)?;
@@ -188,7 +180,6 @@ pub fn send_screen(ui: &mut crate::ui::Ui<'_>, head: &str, note: &str, text: &st
     menu::message(ui.panel, head, "typing", "cursor in the host's field");
     match type_text_with(text, opt) {
         Ok(()) => {
-            crate::catlog!("kbd: text typed");
             menu::message(ui.panel, head, "typed", "any key to go back");
             menu::wait_for_any_key(ui);
             true
@@ -260,57 +251,4 @@ fn wait_taken(budget: &mut Budget) -> Result<(), Error> {
         }
     }
     Err(Error::HostNotReading)
-}
-
-/// Debug → Keyboard EMU test: type a fixed, harmless line into the host.
-///
-/// The way the feature is proven on hardware: switch it on, open a text editor on the
-/// host, run this, and read the line. The text is a constant, so it is safe to name on
-/// the screen and in the log, which a real use of [`type_text`] never is.
-pub fn self_test(ui: &mut crate::ui::Ui<'_>) {
-    use crate::menu;
-    const HEAD: &str = "Keyboard EMU test";
-    const LINE: &str = "catcard keyboard ok";
-
-    if !usbtask::keyboard_on() {
-        menu::message(ui.panel, HEAD, "Keyboard EMU is off", "Settings > Hardware");
-        menu::wait_for_any_key(ui);
-        return;
-    }
-    if !ready() {
-        menu::message(
-            ui.panel,
-            HEAD,
-            "no host is listening",
-            "plug in, then retry",
-        );
-        menu::wait_for_any_key(ui);
-        return;
-    }
-    menu::ask(
-        ui.panel,
-        HEAD,
-        "types a test line",
-        "into the host's window",
-    );
-    if !menu::confirmed(ui) {
-        return;
-    }
-    menu::message(ui.panel, HEAD, "typing", "");
-    match type_text(LINE) {
-        Ok(()) => {
-            crate::catlog!("kbd: self-test line typed");
-            menu::message(
-                ui.panel,
-                HEAD,
-                "typed: check the host",
-                "any key to go back",
-            );
-        }
-        Err(why) => {
-            crate::catlog!("kbd: self-test failed: {}", why.describe());
-            menu::message(ui.panel, HEAD, why.describe(), "any key to go back");
-        }
-    }
-    menu::wait_for_any_key(ui);
 }

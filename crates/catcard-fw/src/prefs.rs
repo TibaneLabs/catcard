@@ -184,6 +184,9 @@ static mut CURRENT: Prefs = Prefs {
 };
 
 /// What the wallet in force is set to.
+// Never inlined: it has about ninety callers, most after one field, and inlined each
+// carried its own copy of the whole struct -- 2.8 KB of the Q1 image (2026-11-13).
+#[inline(never)]
 pub(crate) fn current() -> Prefs {
     // SAFETY: foreground only, single core; `Prefs` is `Copy` and the read finishes
     // within this statement. Written only by `load` and `save`, both foreground.
@@ -303,24 +306,6 @@ pub(crate) fn load(
         fido_gen: prefs::fido_generation(&doc),
         fido_pin: prefs::fido_pin(&doc) != prefs::FidoPin::Unset,
     };
-    crate::catlog!(
-        "prefs: idle {:?}/{:?} min, {}, fee {:?}, usb {}, vdisk {}, kbd {}, wrap {}, net {}, mstrust {}, b85 {}, sighash {}, slip132 {}, nfc {}, pushtx {}",
-        next.idle_minutes,
-        next.battery_idle_minutes,
-        next.units.code(),
-        next.fee_cap,
-        next.usb_port,
-        next.virtual_disk,
-        next.keyboard_emu,
-        next.menu_wrap,
-        next.net.ticker(),
-        next.multisig_trust.code(),
-        if next.b85_unlimited { "open" } else { "capped" },
-        next.sighash.code(),
-        next.slip132,
-        next.nfc_sharing,
-        next.pushtx.label(),
-    );
     apply(next);
 }
 

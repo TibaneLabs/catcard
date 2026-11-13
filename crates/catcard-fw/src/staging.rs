@@ -279,8 +279,8 @@ pub fn not_installed() {
             ),
         },
         Err(why) => crate::catlog!(
-            "install: MARKER NOT RETRACTED: staging area unavailable ({:?})",
-            why
+            "install: MARKER NOT RETRACTED: staging area unavailable ({})",
+            crate::logbuf::Dbg(&why)
         ),
     }
     crate::usbtask::install_refused();

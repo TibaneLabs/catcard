@@ -21,6 +21,7 @@ device):
     tools/usbclient.py hid --host-info
     tools/usbclient.py hid --address m/84h/0h/0h/0/3 [--chain btc] [--format p2wpkh] [--show]
     tools/usbclient.py hid --sign-message "text" --key m/84h/0h/0h/0/3 [--scheme bip322]
+    tools/usbclient.py hid --sign-typed permit.json --key m/44h/60h/0h/0/0
     tools/usbclient.py hid --sign tx.psbt --chain btc --key m/84h/0h/0h/0/3 [--out F]
 
 Reading and writing /dev/hidraw* usually needs root or a udev rule -- see docs/USB.md.
@@ -1281,64 +1282,6 @@ def main(path, image=None):
         print(f"whose own firmware fails to verify. Region: start={start:#x} len={total}.")
         return 0
 
-    if "--stage-settings" in sys.argv:
-        # Put a state dump's settings region into PSRAM for Debug -> Restore settings.
-        # Staging only: the device checks it (length, SHA-256, that it is a volume, that
-        # it is *this* device's) and writes the flash only when the owner says yes on the
-        # device itself. Nothing this command does touches flash.
-        a = arg_after("--stage-settings")
-        if not a:
-            print("usage: --stage-settings <XXXXXXXX-STATE.BIN>")
-            return 1
-        st, body = request(s, IDENTIFY)
-        if not capabilities(body) & CAP_DEBUG_MEM:
-            print("stage     this build has no memory monitor (needs usb-debug-mem)")
-            return 1
-        import hashlib
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        import statedump
-        _manifest, sections = statedump.read(a[0])
-        img = sections.get("settings")
-        if not img:
-            print("stage     that dump has no settings section")
-            return 1
-        # restore::STAGED_AT: one megabyte into the *lower* half. Never the upper half,
-        # where an offered firmware image waits for the owner's yes -- staging over one
-        # made the next approval hand the bootloader settings data as firmware.
-        at = PSRAM_BASE + 0x0010_0000
-        header = 64               # restore::HEADER
-
-        # Unmark first, so a half-finished staging can never look like a finished one.
-        poke(s, at, b"\0" * 8)
-
-        t0 = time.time()
-        per = ((56 - 5) // 4) * 4
-        done = 0
-        while done < len(img):
-            chunk = img[done : done + per]
-            poke(s, at + header + done, chunk)
-            done += len(chunk)
-            if done % (per * 400) == 0 or done >= len(img):
-                rate = done / max(time.time() - t0, 1e-6) / 1024
-                print(f"\rstage     {done}/{len(img)} ({100 * done // len(img)}%) "
-                      f"{rate:.0f} KB/s", end="", flush=True)
-        print()
-        for off in (0, len(img) // 3, 2 * len(img) // 3, len(img) - 64):
-            off &= ~3
-            got = peek(s, at + header + off, 16, 4)
-            if got != img[off : off + len(got)]:
-                print(f"stage     read-back differs at +{off:#x}; not marked")
-                return 1
-
-        # The header, and the magic last within it -- its second word before its first.
-        digest = hashlib.sha256(img).digest()
-        poke(s, at + 8, struct.pack("<II", len(img), 0) + digest + b"\0" * 16)
-        poke(s, at + 4, b"TOR1")
-        poke(s, at, b"CCRS")
-        print(f"stage     {len(img)} bytes staged, sha256 {digest[:4].hex()}..., marked")
-        print("stage     now: Debug -> Restore settings, on the device")
-        return 0
-
     if "--find-attempt" in sys.argv:
         for at, flags, left in find_attempt(s):
             mark = "LOGGED IN" if flags & STATE_SUCCESSFUL else "not logged in"
@@ -1528,12 +1471,15 @@ def main(path, image=None):
         hostwallet.print_info(info)
         return 0
 
-    if "--address" in sys.argv or "--sign-message" in sys.argv:
+    if "--address" in sys.argv or "--sign-message" in sys.argv or "--sign-typed" in sys.argv:
         # One address by its path, or a signature over a message by the key at a path.
         # Both name a chain and an address format; the format defaults to what the path's
         # purpose means. With `--address` repeated, each is asked in turn on one session,
         # which is how "Allow during session" is seen to work: tick it at the first.
-        chain_name = arg_after("--chain")[0] if "--chain" in sys.argv else "btc"
+        # Typed data is Ethereum's (EIP-712), whatever chain id its domain names.
+        typed = "--sign-typed" in sys.argv
+        chain_name = (arg_after("--chain")[0] if "--chain" in sys.argv
+                      else "eth" if typed else "btc")
         chain = hostwallet.CHAIN_IDS.get(chain_name.lower())
         if chain is None:
             print(f"host      unknown chain {chain_name!r}")
@@ -1549,23 +1495,37 @@ def main(path, image=None):
                 return hostwallet.FORMAT_IDS[fmt_name]
             return hostwallet.default_format(chain, steps)
 
-        signing = "--sign-message" in sys.argv
+        signing = typed or "--sign-message" in sys.argv
         if signing:
-            text = arg_after("--sign-message")[0]
-            # `@file` reads the message from a file, as it is.
-            message = open(text[1:], "rb").read() if text.startswith("@") else text.encode()
+            if typed:
+                # What a site hands `eth_signTypedData_v4`, as a JSON file.
+                import json
+                with open(arg_after("--sign-typed")[0]) as f:
+                    message = hostwallet.typed_blob(json.load(f))
+            else:
+                text = arg_after("--sign-message")[0]
+                # `@file` reads the message from a file, as it is.
+                message = (open(text[1:], "rb").read() if text.startswith("@")
+                           else text.encode())
             if "--key" not in sys.argv:
                 print("host      name the --key that signs")
                 return 1
             steps = hostwallet.parse_path(arg_after("--key")[0])
             fmt = fmt_for(steps)
             scheme_name = (arg_after("--scheme")[0] if "--scheme" in sys.argv
-                           else "eip191" if chain == 2 else "bip322" if fmt == 4 else "bip137")
+                           else "eip712" if typed
+                           else {2: "eip191", 9: "tip191", 3: "solana-offchain"}.get(chain)
+                           or ("bip322" if fmt == 4 else "bip137"))
             scheme = hostwallet.SCHEME_IDS.get(scheme_name)
             if scheme is None:
                 print(f"host      unknown scheme {scheme_name!r}: one of "
                       + " ".join(hostwallet.SCHEME_IDS))
                 return 1
+            if scheme == 8:
+                # The older Solana envelope names the application asking: 32 bytes, hex.
+                app = (bytes.fromhex(arg_after("--app-domain")[0])
+                       if "--app-domain" in sys.argv else bytes(32))
+                message = hostwallet.solana_v0_message(app, message)
         else:
             paths = [hostwallet.parse_path(sys.argv[i + 1])
                      for i, a in enumerate(sys.argv) if a == "--address"]
@@ -1580,7 +1540,7 @@ def main(path, image=None):
                 hostwallet.address_at(call, chain, fmt, steps)
                 r = hostwallet.sign_message(call, chain, fmt, scheme, steps, message)
                 sig = r["signature"]
-                shown = "0x" + sig.hex() if r["scheme"] == 4 else sig.decode()
+                shown = "0x" + sig.hex() if r["scheme"] >= 4 else sig.decode()
                 print(f"message   signed by {r['address']}  {hostwallet.path_text(r['path'])}")
                 print(f"message   {hostwallet.SCHEME.get(r['scheme'], r['scheme'])}  {shown}")
             else:
@@ -1677,7 +1637,7 @@ def main(path, image=None):
             return 0
         if not caps & CAP_UNLOCK_PIN:
             print("unlock    this build does not accept a whole-PIN unlock "
-                  "(needs usb-key-injection)")
+                  "(only a bench build's recovery loop does: hold CANCEL at power-on)")
             return 1
         pin = next((a[len("--pin="):] for a in sys.argv if a.startswith("--pin=")), None)
         if not pin:
@@ -1695,7 +1655,8 @@ def main(path, image=None):
         st, body = request(s, IDENTIFY)
         caps = capabilities(body)
         if not caps & CAP_KEY_INJECTION:
-            print("identify  this build does not accept injected keys")
+            print("identify  no injected keys here: only a bench build's recovery loop "
+                  "(hold CANCEL at power-on) takes them")
             return 1
         print("identify  key injection available")
         if not caps & CAP_UPGRADE:

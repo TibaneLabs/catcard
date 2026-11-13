@@ -138,14 +138,7 @@ fn draw_report<C: catcard_ui::canvas::Canvas + ?Sized>(
         body,
         0,
         y(52),
-        match (waiting, crate::usbtask::KEY_INJECTION) {
-            // Stated on the device itself: a build that accepts keys from a host is not
-            // a build to hand to anyone, and this is the screen that always gets looked
-            // at first.
-            (true, _) => "",
-            (false, true) => "stopped: no input   [USB KEYS]",
-            (false, false) => "stopped: no input",
-        },
+        if waiting { "" } else { "stopped: no input" },
     );
 
     // The key is a tick on the cap, so draw a tick. Only when there is something to
@@ -153,24 +146,11 @@ fn draw_report<C: catcard_ui::canvas::Canvas + ?Sized>(
     if waiting {
         use catcard_ui::icons;
         // The bring-up hazards this build carries, on the screen looked at first.
-        let label = match (
-            crate::usbtask::KEY_INJECTION,
-            cfg!(feature = "usb-debug-mem"),
-        ) {
-            (false, false) => "continue",
-            (k, m) => {
-                // Assemble "continue  [KEYS MEM]" from whichever are on.
-                let mut x = draw_text(c, body, 0, y(52), "continue  [");
-                for (on, tag) in [(k, "KEYS "), (m, "MEM")] {
-                    if on {
-                        x = draw_text(c, body, x, y(52), tag);
-                    }
-                }
-                draw_text(c, body, x, y(52), "]");
-                return;
-            }
-        };
-        icons::draw_key_hint(c, body, 0, y(52), display::CONFIRM, label);
+        if cfg!(feature = "usb-debug-mem") {
+            draw_text(c, body, 0, y(52), "continue  [MEM]");
+            return;
+        }
+        icons::draw_key_hint(c, body, 0, y(52), display::CONFIRM, "continue");
     }
 }
 

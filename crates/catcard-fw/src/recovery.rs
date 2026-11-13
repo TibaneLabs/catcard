@@ -15,19 +15,20 @@
 //! - An injected `1` or `2` stages `catcard.dfu` from SD slot A or B, answered the same
 //!   way with `y` or `x`.
 //!
-//! **Bench builds only.** It needs `usb-key-injection`, which already removes physical
-//! presence. Without that feature this is exactly the park it replaced: a shipped device
+//! **Bench builds only** (`usb-recovery`). This loop is the one place a key or a PIN is
+//! taken from a host -- the ordinary session takes neither -- and here that removes
+//! physical presence. Without that feature this is exactly the park it replaced: a shipped device
 //! must not install firmware because a host asked.
 
 use catcard_callgate::Callgate;
-#[cfg(feature = "usb-key-injection")]
+#[cfg(feature = "usb-recovery")]
 use catcard_pin::{Failure, Login, Step};
 
 use crate::{BootReport, display};
 
 /// Take over from the session on a device that cannot run the front panel. Never returns.
 pub fn run(report: BootReport, panel: Option<display::Panel>, gate: Callgate) -> ! {
-    #[cfg(feature = "usb-key-injection")]
+    #[cfg(feature = "usb-recovery")]
     {
         // Nothing past this point draws, so leave the reason on the glass while there is
         // glass: a device with a panel but a failed keypad or entropy check shows the same
@@ -37,15 +38,15 @@ pub fn run(report: BootReport, panel: Option<display::Panel>, gate: Callgate) ->
         }
         headless(gate)
     }
-    #[cfg(not(feature = "usb-key-injection"))]
+    #[cfg(not(feature = "usb-recovery"))]
     {
         let _ = gate;
-        crate::catlog!("recovery: build has no usb-key-injection; parked");
+        crate::catlog!("recovery: build has no usb-recovery; parked");
         crate::selftest::park(report, panel)
     }
 }
 
-#[cfg(feature = "usb-key-injection")]
+#[cfg(feature = "usb-recovery")]
 pub(crate) fn headless(gate: Callgate) -> ! {
     #[cfg(not(feature = "rescue"))]
     use catcard_hal::sdmmc::Slot;
@@ -62,6 +63,7 @@ pub(crate) fn headless(gate: Callgate) -> ! {
     // Only after `Login::new`'s callgate has returned, for the reason `pinentry::unlock`
     // gives: a host that enumerates into a core nobody is servicing wedges.
     usbtask::attach();
+    usbtask::enter_recovery();
     crate::catlog!("recovery: headless -- send the PIN over USB");
 
     let mut said_in = false;
@@ -190,7 +192,7 @@ pub(crate) fn headless(gate: Callgate) -> ! {
 }
 
 /// Log in with a PIN that arrived over USB, setting it first on a blank device.
-#[cfg(feature = "usb-key-injection")]
+#[cfg(feature = "usb-recovery")]
 fn usb_login(g: &crate::pinentry::BootloaderGate<'_>, login: &mut Login, pin: &[u8]) {
     use crate::pinentry::{login_with, split_pin};
 
@@ -224,7 +226,7 @@ fn usb_login(g: &crate::pinentry::BootloaderGate<'_>, login: &mut Login, pin: &[
 ///
 /// mk4/mk5/Q1 only: `gate 18/7` authorises a PSRAM region. mk3 installs by rebooting after
 /// `commit` (see the call site), so this is not built there.
-#[cfg(all(feature = "usb-key-injection", not(feature = "board-mk3")))]
+#[cfg(all(feature = "usb-recovery", not(feature = "board-mk3")))]
 fn install(
     g: &crate::pinentry::BootloaderGate<'_>,
     login: &mut Login,
@@ -246,7 +248,7 @@ fn install(
     }
 }
 
-#[cfg(feature = "usb-key-injection")]
+#[cfg(feature = "usb-recovery")]
 fn failure_name(f: Failure) -> &'static str {
     match f {
         // The bootloader's own verification refused the staged image -- a better answer

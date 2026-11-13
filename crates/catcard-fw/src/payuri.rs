@@ -214,12 +214,6 @@ pub(crate) fn received(
             return;
         }
     };
-    crate::catlog!(
-        "payuri: {} amount {:?} label {:?}",
-        uri.address,
-        uri.amount,
-        uri.label
-    );
 
     let mut amount = heapless::String::<32>::new();
     match uri.amount {

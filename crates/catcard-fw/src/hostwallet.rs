@@ -172,6 +172,16 @@ pub(crate) enum MessageHow {
     /// EIP-191 `personal_sign`.
     #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
     Evm,
+    /// TIP-191, the same under Tron's header and for a Tron address.
+    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    Tron,
+    /// EIP-712 typed data: types and values, not text.
+    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    Typed,
+    /// A Solana off-chain message; `v0` for the older envelope, whose request carries
+    /// the application domain and the format ahead of the text.
+    #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+    Solana { v0: bool },
 }
 
 impl MessageHow {
@@ -186,6 +196,14 @@ impl MessageHow {
             },
             #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
             MessageHow::Evm => wire::scheme::EIP191,
+            #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+            MessageHow::Tron => wire::scheme::TIP191,
+            #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+            MessageHow::Typed => wire::scheme::EIP712,
+            #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+            MessageHow::Solana { v0: false } => wire::scheme::SOLANA_OFFCHAIN,
+            #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+            MessageHow::Solana { v0: true } => wire::scheme::SOLANA_OFFCHAIN_V0,
         }
     }
 }
@@ -265,7 +283,7 @@ pub(crate) fn signs_messages(chain: ChainId) -> bool {
     match chain {
         ChainId::Bitcoin => true,
         #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
-        ChainId::Ethereum => true,
+        ChainId::Ethereum | ChainId::Tron | ChainId::Solana => true,
         _ => false,
     }
 }
@@ -300,10 +318,34 @@ fn message_how(chain: ChainId, format: u8, scheme: u8) -> Result<MessageHow, &'s
             if format != wire::format::EVM {
                 return Err("not an EVM address format");
             }
-            if scheme != wire::scheme::EIP191 {
-                return Err("not an EVM message scheme");
+            match scheme {
+                wire::scheme::EIP191 => Ok(MessageHow::Evm),
+                wire::scheme::EIP712 => Ok(MessageHow::Typed),
+                _ => Err("not an EVM message scheme"),
             }
-            Ok(MessageHow::Evm)
+        }
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        ChainId::Tron => {
+            if format != wire::format::TRON {
+                return Err("not a Tron address format");
+            }
+            // TIP-712 is typed data under Tron's own rules for an address, and is not
+            // EIP-712 with another chain's name on it.
+            if scheme != wire::scheme::TIP191 {
+                return Err("not a Tron message scheme");
+            }
+            Ok(MessageHow::Tron)
+        }
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        ChainId::Solana => {
+            if format != wire::format::SOLANA {
+                return Err("not a Solana address format");
+            }
+            match scheme {
+                wire::scheme::SOLANA_OFFCHAIN => Ok(MessageHow::Solana { v0: false }),
+                wire::scheme::SOLANA_OFFCHAIN_V0 => Ok(MessageHow::Solana { v0: true }),
+                _ => Err("not a Solana message scheme"),
+            }
         }
         _ => Err("this chain does not sign messages here"),
     }
@@ -318,9 +360,22 @@ fn message_unshowable(how: MessageHow, message: &[u8]) -> Option<&'static str> {
             Err(_) => Some("plain ASCII only"),
         },
         #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
-        MessageHow::Evm => catcard_evm::personal::text(message)
+        MessageHow::Evm | MessageHow::Tron => catcard_evm::personal::text(message)
             .err()
             .map(catcard_evm::personal::Unshowable::why),
+        // The types only: the values are read once, on the screen's side, by the walk
+        // that hashes them.
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        MessageHow::Typed => catcard_evm::typed::Typed::parse(message)
+            .err()
+            .map(catcard_evm::typed::Error::why),
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        MessageHow::Solana { v0 } => match catcard_solana::offchain::request(v0, message) {
+            Ok((_, text)) => catcard_evm::personal::text(text)
+                .err()
+                .map(catcard_evm::personal::Unshowable::why),
+            Err(why) => Some(why.why()),
+        },
     }
 }
 
@@ -450,7 +505,6 @@ impl Desk {
         if let Some(r) = self.refuse_new(out, cx, false) {
             return r;
         }
-        crate::catlog!("host: addresses asked for");
         self.state = State::Queued {
             owner: cx.session,
             ask: Ask::Addresses,
@@ -487,7 +541,6 @@ impl Desk {
         if f.encoding == Encoding::Solana && !path.fully_hardened() {
             return refuse(out, "a Solana key path must be hardened throughout");
         }
-        crate::catlog!("host: one {} address asked for", c.name);
         self.state = State::Queued {
             owner: cx.session,
             ask: Ask::AddressAt {
@@ -529,6 +582,9 @@ impl Desk {
         if hostkeys::check(cx.exposed, cx.shared, chain, &[path]).is_err() {
             return refuse(out, "the key was not shared this session");
         }
+        if chain == ChainId::Solana && !path.fully_hardened() {
+            return refuse(out, "a Solana key path must be hardened throughout");
+        }
         if let Some(why) = message_unshowable(how, req.message) {
             return refuse(out, why);
         }
@@ -537,11 +593,6 @@ impl Desk {
             return refuse(out, "not enough memory now");
         };
         text.bytes()[..len].copy_from_slice(req.message);
-        crate::catlog!(
-            "host: {} message of {} bytes queued",
-            chain_name(chain),
-            len
-        );
         self.state = State::Queued {
             owner: cx.session,
             ask: Ask::Message {
@@ -568,7 +619,10 @@ impl Desk {
         if !cx.exposed.is_empty() || !cx.shared.is_empty() {
             session |= wire::session::SHARED;
         }
-        let features = wire::feature::ADDRESS_AT | wire::feature::SIGN_MESSAGE;
+        let mut features = wire::feature::ADDRESS_AT | wire::feature::SIGN_MESSAGE;
+        if signs_messages(ChainId::Ethereum) {
+            features |= wire::feature::TYPED_DATA;
+        }
         let Ok(mut w) = wire::InfoWriter::new(out, features, session) else {
             return (Status::BadRequest, 0);
         };
@@ -625,7 +679,6 @@ impl Desk {
             Ok(buf) => buf,
             Err(why) => return refuse(out, why),
         };
-        crate::catlog!("host: sign upload of {} bytes opened", total);
         self.state = State::Uploading {
             owner: cx.session,
             chain,
@@ -700,7 +753,6 @@ impl Desk {
             crate::catlog!("host: sign request refused: {}", why);
             return refuse(out, why);
         }
-        crate::catlog!("host: sign request queued ({})", chain_name(chain));
         self.state = State::Queued {
             owner,
             ask: Ask::Sign {
@@ -752,7 +804,6 @@ impl Desk {
         match &self.state {
             State::Idle => (Status::Ok, 0),
             State::Uploading { owner, .. } | State::Done { owner, .. } if *owner == cx.session => {
-                crate::catlog!("host: dropped at the host's request");
                 self.state = State::Idle;
                 (Status::Ok, 0)
             }
@@ -1335,7 +1386,6 @@ fn build_addresses(
     let _ = solana;
 
     let len = w.finish();
-    crate::catlog!("host: {} bytes of addresses for account {}", len, account);
     Ok((block, len, exposed))
 }
 
@@ -1460,11 +1510,8 @@ fn address_at(
         {
             return (Outcome::Declined, false);
         }
-        if rows[0].on {
-            if !crate::usbtask::host_allow_paths(ticket) {
-                return (Outcome::Declined, false);
-            }
-            crate::catlog!("host: addresses by path allowed for this session");
+        if rows[0].on && !crate::usbtask::host_allow_paths(ticket) {
+            return (Outcome::Declined, false);
         }
     }
 
@@ -1512,7 +1559,6 @@ fn address_at(
     let Ok(len) = reply.encode(block.bytes()) else {
         return (Outcome::Refused("could not write the address"), false);
     };
-    crate::catlog!("host: one {} address shared", c.name);
     set_note(c.name);
     (
         Outcome::Ready {
@@ -1520,7 +1566,9 @@ fn address_at(
             off: 0,
             len,
         },
-        allowed && !show,
+        // No closing screen once the session has the allowance -- including the request
+        // it was given on: the person has just said they do not want to be stopped.
+        crate::usbtask::host_paths_allowed(ticket) && !show,
     )
 }
 
@@ -1645,9 +1693,6 @@ fn message(
     if let Some(why) = message_unshowable(how, bytes) {
         return Outcome::Refused(why);
     }
-    let Ok(body) = core::str::from_utf8(bytes) else {
-        return Outcome::Refused("plain ASCII only");
-    };
 
     let mut b: heapless::String<24> = heapless::String::new();
     let _ = write!(b, "{} message", chain_name(chain));
@@ -1659,12 +1704,25 @@ fn message(
     // The scheme's own review -- the text, the address that signs, the path, and how --
     // and its own check of the signature before anything is handed back.
     let done: Result<Outcome, Outcome> = match how {
-        MessageHow::Bitcoin { kind, format } => {
-            bitcoin_message(gate, login, ui, how, path, body, kind, format)
+        MessageHow::Bitcoin { kind, format } => match core::str::from_utf8(bytes) {
+            Ok(body) => bitcoin_message(gate, login, ui, how, path, body, kind, format),
+            Err(_) => Err(Outcome::Refused("plain ASCII only")),
+        },
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        MessageHow::Evm | MessageHow::Tron => {
+            let tron = matches!(how, MessageHow::Tron);
+            crate::evmtx::host_sign_message(gate, login, ui, tron, bytes, path, ticket).and_then(
+                |(address, sig)| message_result(chain, how, path, address.as_bytes(), &sig),
+            )
         }
         #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
-        MessageHow::Evm => crate::evmtx::host_sign_message(gate, login, ui, body, path, ticket)
+        MessageHow::Typed => crate::evmtx::host_sign_typed(gate, login, ui, bytes, path, ticket)
             .and_then(|(address, sig)| message_result(chain, how, path, address.as_bytes(), &sig)),
+        #[cfg(all(feature = "multichain", not(feature = "board-mk3")))]
+        MessageHow::Solana { v0 } => crate::solanatx::host_sign_message(
+            gate, login, ui, v0, bytes, path, ticket,
+        )
+        .and_then(|(address, sig)| message_result(chain, how, path, address.as_bytes(), &sig)),
     };
     let outcome = match done {
         Ok(o) | Err(o) => o,
@@ -1673,7 +1731,6 @@ fn message(
         if !alive(ticket) {
             return Outcome::Declined;
         }
-        crate::catlog!("host: {} message signed", chain_name(chain));
         set_note("signed message");
     }
     outcome

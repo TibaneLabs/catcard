@@ -89,12 +89,6 @@ pub unsafe fn init() {
         );
         *addr_of_mut!(SENSE) = Some(pin);
     }
-    crate::catlog!(
-        "power: rev {}, battery sense on P{}{}",
-        if rev_d { "D+" } else { "pre-D" },
-        pin.port.letter(),
-        pin.num
-    );
 }
 
 /// Where power is coming from, or `None` on a board with no battery to be on.
@@ -166,7 +160,7 @@ pub fn charge() -> Option<Charge> {
         *state = match up {
             Ok(()) => Adc::Up,
             Err(e) => {
-                crate::catlog!("battery: ADC would not start: {:?}", e);
+                crate::catlog!("battery: ADC would not start: {}", crate::logbuf::Dbg(&e));
                 Adc::Failed
             }
         };
@@ -180,7 +174,7 @@ pub fn charge() -> Option<Charge> {
         match unsafe { catcard_hal::adc::read(VIN_CHANNEL) } {
             Ok(v) => *s = v,
             Err(e) => {
-                crate::catlog!("battery: ADC read failed: {:?}", e);
+                crate::catlog!("battery: ADC read failed: {}", crate::logbuf::Dbg(&e));
                 return None;
             }
         }

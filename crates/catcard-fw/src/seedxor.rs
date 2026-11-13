@@ -145,7 +145,6 @@ pub(crate) fn split(
     }
     drop(parts);
 
-    crate::catlog!("xor: showed {} parts, {} bytes each", count, len);
     menu::message(ui.panel, SPLIT, "all parts shown", "nothing was stored");
     menu::wait_for_any_key(ui);
 }
@@ -375,7 +374,6 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             };
             match added {
                 Ok(()) => {
-                    crate::catlog!("xor: part {} of {} from {:?}", i + 1, count, from);
                     break;
                 }
                 Err((a, b)) => {
@@ -422,7 +420,6 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
         menu::wait_for_any_key(ui);
         return;
     };
-    let count_of_words = words.word_count();
     drop(words);
 
     let was = crate::key::in_force();
@@ -439,7 +436,6 @@ pub(crate) fn join(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
             drop(master);
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
-            crate::catlog!("xor: joined {} words", count_of_words);
             crate::settings::open_wallet(gate, login, ui.panel, JOIN, [a, b, c, d]);
             menu::message(ui.panel, "Joined", &said, "in force until reboot");
             menu::wait_for_any_key(ui);

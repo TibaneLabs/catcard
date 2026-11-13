@@ -127,26 +127,6 @@ fn list_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>)
     let offer_store = mine
         .as_ref()
         .is_some_and(|x| !vault::holds(&seeds[..have], x));
-    // Rows in the document against rows read: a difference is entries this firmware
-    // skipped, which stay in the file but are not offered.
-    let rows = doc
-        .get(vault::KEY)
-        .and_then(|raw| catcard_settings::json::elements(raw).ok())
-        .map_or(0, |it| it.count());
-    crate::catlog!(
-        "vault: {} of {} rows read, doc {} B, key {} {}",
-        have,
-        rows,
-        n,
-        crate::key::label(),
-        match (&mine, offer_store) {
-            (Some(_), true) => "can be kept",
-            (Some(_), false) => "already kept",
-            (None, _) if storable => "fingerprint unknown",
-            (None, _) => "not storable",
-        }
-    );
-
     let mut labels: heapless::Vec<heapless::String<40>, MAX_SEEDS> = heapless::Vec::new();
     for s in &seeds[..have] {
         let mut line: heapless::String<40> = heapless::String::new();
@@ -266,12 +246,6 @@ fn use_seed(
                 menu::wait_for_any_key(ui);
                 return;
             }
-            crate::catlog!(
-                "vault: now in {} ({}, {}), matches its entry",
-                said.as_str(),
-                crate::key::label(),
-                method
-            );
             crate::settings::open_wallet(gate, login, ui.panel, HEAD, [a, b, c, d]);
             crate::pubkeys::note_fingerprint(Some([a, b, c, d]));
             menu::message(ui.panel, HEAD, &said, "in force until reboot");

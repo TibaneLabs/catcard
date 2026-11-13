@@ -171,6 +171,7 @@ version = "7.0.0"
 dependencies = [
  "evmabiless",
  "outscript",
+ "purecrypto",
 ]
 
 [[package]]

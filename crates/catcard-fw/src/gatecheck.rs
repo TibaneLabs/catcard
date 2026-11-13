@@ -18,17 +18,9 @@
 //! HMACs a fixed two-digit prefix, 19/0 reads the bag number, 21/0 reads the
 //! anti-downgrade mark and 26 reads randomness, which is discarded.
 
-use core::fmt::Write as _;
-
 use catcard_callgate::abi::{BagOp, Method, OtpOp, RngSource};
 use catcard_callgate::{Callgate, Error};
-use catcard_ui::scroll::Line as Row;
 use zeroize::Zeroize as _;
-
-use crate::menu;
-use crate::ui::Ui;
-
-type Text = heapless::String<48>;
 
 /// Calls made to each secure element's randomness: enough to see whether refusals are
 /// occasional or the rule.
@@ -41,23 +33,6 @@ fn raw(r: Result<i32, Error>) -> Option<i32> {
         Ok(rv) | Err(Error::Pin(rv)) | Err(Error::Failed(rv)) => Some(rv),
         Err(_) => None,
     }
-}
-
-fn put(t: &mut Text, rv: Option<i32>) {
-    let _ = match rv {
-        Some(rv) => write!(t, " {rv}"),
-        None => t.push_str(" -").map_err(|_| core::fmt::Error),
-    };
-}
-
-/// One gate read into `buf`, logged and listed as `label: rv N`.
-fn one(texts: &mut heapless::Vec<Text, 8>, label: &str, rv: Option<i32>) {
-    let mut t = Text::new();
-    let _ = t.push_str(label);
-    let _ = t.push_str(": rv");
-    put(&mut t, rv);
-    crate::catlog!("gatecheck: {}", t.as_str());
-    let _ = texts.push(t);
 }
 
 /// Every raw return [`collect`] gathers. `None` where the call never reached the
@@ -139,33 +114,4 @@ pub fn encode(r: &Replies, out: &mut [u8]) -> usize {
         }
     }
     at
-}
-
-pub fn screen(gate: &Callgate, ui: &mut Ui<'_>) {
-    let r = collect(gate);
-    let mut texts: heapless::Vec<Text, 8> = heapless::Vec::new();
-    one(&mut texts, "0 version", r.version);
-    one(&mut texts, "16 words", r.words);
-    one(&mut texts, "19/0 bag", r.bag);
-    one(&mut texts, "21/0 min version", r.min_version);
-    for (source, label) in r.se.iter().zip(["26/1", "26/2"]) {
-        let mut t = Text::new();
-        let mut lens = Text::new();
-        let _ = write!(t, "{label} rv");
-        let _ = lens.push_str(" len");
-        for (rv, len) in source {
-            put(&mut t, *rv);
-            let _ = write!(lens, " {len}");
-        }
-        crate::catlog!("gatecheck: {}{}", t.as_str(), lens.as_str());
-        let _ = texts.push(t);
-        let _ = texts.push(lens);
-    }
-
-    let mut rows: heapless::Vec<Row<'_>, 10> = heapless::Vec::new();
-    let _ = rows.push(Row::title("Bootloader replies"));
-    for t in &texts {
-        let _ = rows.push(Row::body(t.as_str()).wrapped());
-    }
-    let _ = menu::show_doc(ui, &rows, false, false);
 }

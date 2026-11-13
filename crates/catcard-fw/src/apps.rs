@@ -94,7 +94,6 @@ struct Layout {
     /// Bytes of the code region: a power of two, at least `code_end - base`.
     code_region: u32,
     data_end: u32,
-    bss_end: u32,
 }
 
 /// Why an image was refused before it ran.
@@ -155,7 +154,6 @@ fn layout(base: u32, len: u32) -> Result<Layout, Refused> {
         entry,
         code_region,
         data_end,
-        bss_end,
     })
 }
 
@@ -201,11 +199,6 @@ pub fn claim() -> bool {
         }
         None => false,
     };
-    crate::catlog!(
-        "apps: area {:?} {}",
-        ARENA,
-        if ok { "claimed" } else { "unusable" }
-    );
     CLAIMED.store(if ok { 1 } else { 2 }, Ordering::Relaxed);
     ok
 }
@@ -306,7 +299,7 @@ fn report(outcome: &Result<Exit, Refused>) {
             cfsr,
             addr
         ),
-        Err(why) => crate::catlog!("apps: refused {:?}", why),
+        Err(why) => crate::catlog!("apps: refused {}", crate::logbuf::Dbg(&why)),
     }
 }
 
@@ -338,14 +331,6 @@ fn run(arg: u32, ui: &mut Ui<'_>) -> Result<Exit, Refused> {
         catcard_kernel::app::set_privilege_hook(on_privilege);
         catcard_hal::mpu::enable_app_faults();
     }
-    crate::catlog!(
-        "apps: run entry {:#010x} code {} data {}..{} arg {:#x}",
-        l.entry,
-        l.code_region,
-        l.data_end,
-        l.bss_end,
-        arg
-    );
     // SAFETY: UI task only; cleared again below, before `ui` is used by anyone else.
     unsafe { *core::ptr::addr_of_mut!(UI) = (ui as *mut Ui<'_>).cast() };
     // SAFETY: from the UI task, privileged, interrupts enabled; the entry and stack are in
@@ -872,7 +857,6 @@ fn unpack(name: &str) -> Result<(), Refused> {
         if src.saturating_add(packed) > hi || unpacked > len {
             return Err(Refused::Damaged);
         }
-        let t0 = catcard_hal::dwt::cycles();
         // SAFETY: the packed bytes are inside the image (checked); the area is the app's and
         // no app runs.
         let (input, out) = unsafe {
@@ -882,19 +866,13 @@ fn unpack(name: &str) -> Result<(), Refused> {
             )
         };
         let got = compcol::embed::flate::unzlib(input, compcol::embed::flate::Buffer::new(out));
-        // SAFETY: reads RCC.
-        let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
-        let us = catcard_hal::dwt::cycles().wrapping_sub(t0) / per_us;
         return match got {
-            Ok(n) if n == unpacked as u64 => {
-                crate::catlog!("apps: {} unpacked {} -> {} B in {} us", name, packed, n, us);
-                Ok(())
-            }
+            Ok(n) if n == unpacked as u64 => Ok(()),
             other => {
                 crate::catlog!(
-                    "apps: {} did not unpack: {:?}",
+                    "apps: {} did not unpack: {}",
                     name,
-                    other.map(|n| n as u32)
+                    crate::logbuf::Dbg(&other.map(|n| n as u32))
                 );
                 Err(Refused::Damaged)
             }

@@ -36,7 +36,6 @@ pub(crate) fn enabled(
         return list;
     }
     let list = read(gate, login, ui).unwrap_or_else(all);
-    crate::catlog!("chains: {} offered", list.len());
     // SAFETY: as above.
     unsafe { *core::ptr::addr_of_mut!(ENABLED) = Some(list.clone()) };
     list

@@ -110,7 +110,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut Login, ui: &mut Ui<'_>) {
         Ok(c) => c,
         Err(catcard_sd::Error::NoCard) => return say(ui, "no card in slot"),
         Err(e) => {
-            crate::catlog!("sd: card would not start: {:?}", e);
+            crate::catlog!("sd: card would not start: {}", crate::logbuf::Dbg(&e));
             return say(ui, "card would not start");
         }
     };

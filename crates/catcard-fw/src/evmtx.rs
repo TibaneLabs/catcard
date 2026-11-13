@@ -358,7 +358,6 @@ pub(crate) fn host_sign(
             Ok(m) => m,
             Err(_) => break 'work Err(refuse(ui, "result too large")),
         };
-        crate::catlog!("evm: signed {} bytes for the computer", n);
         Ok((base + scratch_len + signed_len, m))
     };
     match done {
@@ -371,53 +370,47 @@ pub(crate) fn host_sign(
     }
 }
 
-/// Sign `text` for a computer asking over the encrypted channel (`crate::hostwallet`), as
-/// EIP-191 `personal_sign` by the key at `key`: the text, the address that signs and the
-/// path on the screen, and yes or no. The address and the 65 bytes `r || s || v`.
-///
-/// The text has already passed [`catcard_evm::personal::text`], so every byte of it is
-/// one the screen shows. It is laid out a line to a line, and a message this panel cannot
-/// hold whole is refused rather than shown cut: what is signed is what was read.
-///
-/// The signature is checked before it is handed back -- the key is recovered from it and
-/// compared with the one that signed -- as every signature made here is.
-// Its own frame, as `host_sign` is: the review's lines and view are the deepest part.
+/// Room for an address of either chain that signs here.
+type Who = heapless::String<{ catcard_wallet::chain::address::MAX_LEN }>;
+
+/// The one key a message is signed with, and what the screen says of it.
+struct Signer {
+    /// Only the leaf: the master is the whole wallet, and a review can stand on the
+    /// screen for as long as nobody is in the room.
+    leaf: catcard_wallet::bip32::ExtendedPrivKey,
+    public: [u8; 33],
+    who: Who,
+    path: heapless::String<{ 1 + catcard_wallet::hostkeys::MAX_DEPTH * 12 }>,
+}
+
+/// What a refusal looks like on the screen, and what the host is told.
+fn refuse(ui: &mut crate::ui::Ui<'_>, head: &str, why: &'static str) -> crate::hostwallet::Outcome {
+    crate::menu::message(ui.panel, head, why, "any key to go back");
+    crate::menu::wait_for_any_key(ui);
+    crate::hostwallet::Outcome::Refused(why)
+}
+
+/// Derive the key at `key` and write its address as `chain` does (`tron` for Tron's,
+/// Ethereum's otherwise).
 #[inline(never)]
-pub(crate) fn host_sign_message(
+fn signer(
     gate: &catcard_callgate::Callgate,
     login: &mut catcard_pin::Login,
     ui: &mut crate::ui::Ui<'_>,
-    text: &str,
+    head: &str,
+    tron: bool,
     key: &catcard_wallet::hostkeys::KeyPath,
-    ticket: u32,
-) -> Result<
-    (
-        heapless::String<{ catcard_wallet::chain::address::MAX_LEN }>,
-        [u8; catcard_evm::personal::SIG_LEN],
-    ),
-    crate::hostwallet::Outcome,
-> {
+) -> Result<Signer, crate::hostwallet::Outcome> {
     use crate::hostwallet::Outcome;
-    use catcard_evm::personal;
     use catcard_wallet::bip32::ChildNumber;
     use catcard_wallet::chain::{self, Encoding, address as caddr};
     use core::fmt::Write as _;
-    use outscript::crypto::secp256k1::{SecpPrivateKey, recover_public_key};
-    const HEAD: &str = "Sign message";
 
-    let refuse = |ui: &mut crate::ui::Ui<'_>, why: &'static str| {
-        crate::menu::message(ui.panel, HEAD, why, "any key to go back");
-        crate::menu::wait_for_any_key(ui);
-        Outcome::Refused(why)
-    };
-
-    let Some(master) = crate::menu::unlock_master(gate, login, ui, HEAD) else {
+    let Some(master) = crate::menu::unlock_master(gate, login, ui, head) else {
         return Err(Outcome::Refused("the wallet could not be opened"));
     };
-    // Only the leaf is kept past this point: the master is the whole wallet, and the
-    // review that follows can stand there for as long as nobody is in the room.
     let leaf = {
-        let mut busy = crate::menu::Working::new(ui.panel, HEAD, "deriving");
+        let mut busy = crate::menu::Working::new(ui.panel, head, "deriving");
         let leaf = crate::keywork::run(|kw| {
             let mut here = master.clone();
             for &s in key.steps() {
@@ -430,26 +423,25 @@ pub(crate) fn host_sign_message(
     };
     drop(master);
     let Some(leaf) = leaf else {
-        return Err(refuse(ui, "the key could not be derived"));
+        return Err(refuse(ui, head, "the key could not be derived"));
     };
     let public = crate::keywork::run(|kw| leaf.public_key(kw));
 
-    let mut addr = [0u8; caddr::MAX_LEN];
-    let Ok(n) = caddr::from_secp256k1(
-        &chain::ETHEREUM,
-        Encoding::Evm,
-        crate::prefs::network(),
-        &public,
-        &mut addr,
-    ) else {
-        drop(leaf);
-        return Err(refuse(ui, "address failed"));
+    let (c, encoding) = if tron {
+        (&chain::TRON, Encoding::Tron)
+    } else {
+        (&chain::ETHEREUM, Encoding::Evm)
     };
-    let mut who: heapless::String<{ caddr::MAX_LEN }> = heapless::String::new();
+    let mut addr = [0u8; caddr::MAX_LEN];
+    let Ok(n) = caddr::from_secp256k1(c, encoding, crate::prefs::network(), &public, &mut addr)
+    else {
+        drop(leaf);
+        return Err(refuse(ui, head, "address failed"));
+    };
+    let mut who = Who::new();
     let _ = who.push_str(core::str::from_utf8(&addr[..n]).unwrap_or(""));
 
-    let mut path: heapless::String<{ 1 + catcard_wallet::hostkeys::MAX_DEPTH * 12 }> =
-        heapless::String::new();
+    let mut path = heapless::String::new();
     let _ = path.push('m');
     for step in key.steps() {
         const H: u32 = catcard_wallet::bip32::HARDENED_OFFSET;
@@ -460,64 +452,121 @@ pub(crate) fn host_sign_message(
             if step & H != 0 { "h" } else { "" }
         );
     }
-    match confirm_message(ui, HEAD, text, &who, &path) {
-        Ok(true) => {}
-        Ok(false) => {
-            drop(leaf);
-            return Err(Outcome::Declined);
-        }
-        Err(why) => {
-            drop(leaf);
-            return Err(refuse(ui, why));
-        }
-    }
-    if !crate::usbtask::host_alive(ticket) {
-        drop(leaf);
-        return Err(Outcome::Declined);
-    }
+    Ok(Signer {
+        leaf,
+        public,
+        who,
+        path,
+    })
+}
 
-    let mut busy = crate::menu::Working::new(ui.panel, HEAD, "signing");
-    let hash = crate::heap::take(personal::scratch_len(text.len()))
-        .and_then(|mut scratch| personal::digest(text.as_bytes(), scratch.bytes()));
-    let Some(hash) = hash else {
-        drop(leaf);
-        return Err(refuse(ui, "not enough memory"));
-    };
+/// Sign `hash` with the signer's key, check the signature as a verifier would, and give
+/// the 65 bytes `r || s || v`.
+///
+/// The check recovers the key from the signature and compares it with the one that
+/// signed -- as every signature made here is checked. One that does not recover is worse
+/// than none.
+#[inline(never)]
+fn sign_digest(
+    ui: &mut crate::ui::Ui<'_>,
+    head: &str,
+    signer: Signer,
+    hash: &[u8; 32],
+) -> Result<(Who, [u8; catcard_evm::personal::SIG_LEN]), crate::hostwallet::Outcome> {
+    use outscript::crypto::secp256k1::{SecpPrivateKey, recover_public_key};
+    let Signer {
+        leaf, public, who, ..
+    } = signer;
+    let mut busy = crate::menu::Working::new(ui.panel, head, "signing");
     let sig = crate::keywork::run(|_kw| {
         let k = SecpPrivateKey::from_bytes(leaf.secret_bytes()).ok()?;
-        Some(k.sign_recoverable(&hash))
+        Some(k.sign_recoverable(hash))
     });
     drop(leaf);
     busy.tick(ui.panel);
     let Some((r, s, recid)) = sig else {
-        return Err(refuse(ui, "could not sign"));
+        return Err(refuse(ui, head, "could not sign"));
     };
-    // Check our own work, as a verifier would: recover the key and compare it with the
-    // one that signed. A signature that does not recover is worse than none.
-    match recover_public_key(&r, &s, recid, &hash) {
+    match recover_public_key(&r, &s, recid, hash) {
         Ok(k) if k.serialize_compressed() == public => {}
-        _ => return Err(refuse(ui, "signature did not verify")),
+        _ => return Err(refuse(ui, head, "signature did not verify")),
     }
-    let Some(out) = personal::signature(&r, &s, recid) else {
-        return Err(refuse(ui, "could not sign"));
+    let Some(out) = catcard_evm::personal::signature(&r, &s, recid) else {
+        return Err(refuse(ui, head, "could not sign"));
     };
-    crate::catlog!("evm: signed a {}-byte message for the computer", text.len());
     Ok((who, out))
+}
+
+/// Sign `text` for a computer asking over the encrypted channel (`crate::hostwallet`), as
+/// EIP-191 `personal_sign` -- or, with `tron`, as TIP-191 for a Tron address -- by the
+/// key at `key`: the text, the address that signs and the path on the screen, and yes or
+/// no. The address and the 65 bytes `r || s || v`.
+///
+/// The text is put through [`catcard_evm::personal::text`], so every byte of it is one
+/// the screen shows. It is laid out a line to a line, and a message this panel cannot
+/// hold whole is refused rather than shown cut: what is signed is what was read.
+// Its own frame, as `host_sign` is: the review's lines and view are the deepest part.
+#[inline(never)]
+pub(crate) fn host_sign_message(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    tron: bool,
+    message: &[u8],
+    key: &catcard_wallet::hostkeys::KeyPath,
+    ticket: u32,
+) -> Result<(Who, [u8; catcard_evm::personal::SIG_LEN]), crate::hostwallet::Outcome> {
+    use crate::hostwallet::Outcome;
+    use catcard_evm::personal;
+    const HEAD: &str = "Sign message";
+
+    let text = match personal::text(message) {
+        Ok(text) => text,
+        Err(why) => return Err(Outcome::Refused(why.why())),
+    };
+    // The key is read under another heading: nothing has been shown yet, and "Sign
+    // message" over a progress bar reads as signing it.
+    let signer = signer(gate, login, ui, "Message request", tron, key)?;
+    let (how, prefix) = if tron {
+        ("Tron, signMessageV2", personal::TRON_PREFIX)
+    } else {
+        ("Ethereum, personal_sign", personal::PREFIX)
+    };
+    match confirm_message(ui, HEAD, text, &signer.who, &signer.path, &[how]) {
+        Ok(true) => {}
+        Ok(false) => return Err(Outcome::Declined),
+        Err(why) => return Err(refuse(ui, HEAD, why)),
+    }
+    if !crate::usbtask::host_alive(ticket) {
+        return Err(Outcome::Declined);
+    }
+
+    let hash = crate::heap::take(personal::scratch_len(text.len()))
+        .and_then(|mut scratch| personal::digest_under(prefix, text.as_bytes(), scratch.bytes()));
+    let Some(hash) = hash else {
+        return Err(refuse(ui, HEAD, "not enough memory"));
+    };
+    let done = sign_digest(ui, HEAD, signer, &hash)?;
+    Ok(done)
 }
 
 /// The message a line to a line, the address that will sign it, the path and how. `Ok`
 /// with the person's answer, or why the message cannot be put to them at all.
+///
+/// `how` is the last rows: the scheme, and whatever else the envelope carries that the
+/// person should see.
 #[inline(never)]
-fn confirm_message(
+pub(crate) fn confirm_message(
     ui: &mut crate::ui::Ui<'_>,
     head: &str,
     text: &str,
     address: &str,
     path: &str,
+    how: &[&str],
 ) -> Result<bool, &'static str> {
     use catcard_evm::personal;
     use catcard_ui::scroll::{Line, ScrollView};
-    let mut doc: heapless::Vec<Line, { personal::MAX_LINES + 5 }> = heapless::Vec::new();
+    let mut doc: heapless::Vec<Line, { personal::MAX_LINES + 8 }> = heapless::Vec::new();
     let _ = doc.push(Line::title(head));
     for line in text.split('\n') {
         doc.push(Line::body(line).wrapped())
@@ -526,7 +575,10 @@ fn confirm_message(
     let _ = doc.push(Line::body("will be signed by").small());
     let _ = doc.push(Line::body(address).small().wrapped());
     let _ = doc.push(Line::body(path).small().wrapped());
-    let _ = doc.push(Line::body("Ethereum, personal_sign").small().wrapped());
+    for row in how {
+        doc.push(Line::body(row).small().wrapped())
+            .map_err(|_| "message has too many lines")?;
+    }
     if !fits(&doc) {
         return Err("too long to show here");
     }
@@ -545,4 +597,320 @@ fn confirm_message(
 #[inline(never)]
 fn fits(doc: &[catcard_ui::scroll::Line<'_>]) -> bool {
     !catcard_ui::scroll::wrap(doc, crate::display::SCREEN_W, &crate::display::FONTS).is_full()
+}
+
+// ---- typed data (EIP-712) --------------------------------------------------------------
+
+/// Characters of text a typed-data review can run to, labels and values together.
+const SHEET_TEXT: usize = 4096;
+/// Rows a typed-data review can run to.
+const SHEET_ROWS: usize = 192;
+/// Rows on one page of it, before wrapping.
+const PAGE_ROWS: usize = 40;
+
+/// One row of a review: where its text is, and whether it names a value or is one.
+#[derive(Copy, Clone)]
+struct Span {
+    start: u16,
+    end: u16,
+    label: bool,
+}
+
+/// A typed-data review as text: a label, then the rows of its value, for every value in
+/// the order it is hashed.
+///
+/// On the heap, at a size fixed here. What does not fit is not shown short: `lost` is
+/// set, and nothing is signed.
+struct Sheet {
+    text: alloc::string::String,
+    spans: alloc::vec::Vec<Span>,
+    lost: bool,
+}
+
+/// A `String` that is never grown: writing past what was reserved fails.
+struct Bounded<'s>(&'s mut alloc::string::String);
+
+impl core::fmt::Write for Bounded<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        if self.0.len() + s.len() > self.0.capacity() {
+            return Err(core::fmt::Error);
+        }
+        self.0.push_str(s);
+        Ok(())
+    }
+}
+
+impl Sheet {
+    fn new() -> Option<Self> {
+        let mut text = alloc::string::String::new();
+        text.try_reserve_exact(SHEET_TEXT).ok()?;
+        let mut spans = alloc::vec::Vec::new();
+        spans.try_reserve_exact(SHEET_ROWS).ok()?;
+        Some(Sheet {
+            text,
+            spans,
+            lost: false,
+        })
+    }
+
+    fn put(&mut self, label: bool, args: core::fmt::Arguments<'_>) {
+        use core::fmt::Write as _;
+        let start = self.text.len();
+        if self.spans.len() == self.spans.capacity()
+            || Bounded(&mut self.text).write_fmt(args).is_err()
+        {
+            self.text.truncate(start);
+            self.lost = true;
+            return;
+        }
+        self.spans.push(Span {
+            start: start as u16,
+            end: self.text.len() as u16,
+            label,
+        });
+    }
+
+    /// The name of what follows.
+    fn label(&mut self, args: core::fmt::Arguments<'_>) {
+        self.put(true, args);
+    }
+
+    /// One row of a value.
+    fn value(&mut self, args: core::fmt::Arguments<'_>) {
+        self.put(false, args);
+    }
+
+    fn row(&self, span: Span) -> &str {
+        &self.text[usize::from(span.start)..usize::from(span.end)]
+    }
+}
+
+const _: () = assert!(SHEET_TEXT <= u16::MAX as usize);
+
+/// Bytes as hex digits.
+struct Hex<'a>(&'a [u8]);
+
+impl core::fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// One value, in the words a person reads it in.
+///
+/// `chain` is set for the domain's `chainId`, which is worth a name beside the number.
+fn typed_value(sheet: &mut Sheet, chain: bool, leaf: catcard_evm::typed::Leaf<'_>) {
+    use catcard_evm::typed::Leaf;
+    let mut num = [0u8; catcard_evm::summary::DECIMAL_MAX];
+    match leaf {
+        // An allowance of every token there will ever be is written as this number, and
+        // seventy-eight digits is not how a person recognises it.
+        Leaf::Uint { raw, bits: 256 } if raw == [0xff; 32] => {
+            sheet.value(format_args!("unlimited (the largest number)"));
+        }
+        Leaf::Uint { raw, .. } => {
+            let n = scaled(&raw, 0, &mut num);
+            let name = (chain && raw[..24].iter().all(|b| *b == 0))
+                .then(|| {
+                    let mut id = [0u8; 8];
+                    id.copy_from_slice(&raw[24..]);
+                    catcard_evm::tokens::chain_name(u64::from_be_bytes(id))
+                })
+                .flatten();
+            match name {
+                Some(name) => sheet.value(format_args!("{n} ({name})")),
+                None => sheet.value(format_args!("{n}")),
+            }
+        }
+        Leaf::Int { raw } if raw[0] & 0x80 != 0 => {
+            // Two's complement: the magnitude is every bit turned over, plus one.
+            let mut mag = raw;
+            let mut carry = true;
+            for b in mag.iter_mut().rev() {
+                let (v, c) = (!*b).overflowing_add(u8::from(carry));
+                *b = v;
+                carry = c;
+            }
+            sheet.value(format_args!("-{}", scaled(&mag, 0, &mut num)));
+        }
+        Leaf::Int { raw } => sheet.value(format_args!("{}", scaled(&raw, 0, &mut num))),
+        Leaf::Bool(b) => sheet.value(format_args!("{}", if b { "true" } else { "false" })),
+        Leaf::Address(a) => {
+            let mut addr = [0u8; ADDRESS];
+            sheet.value(format_args!("{}", address(&a, &mut addr)));
+        }
+        Leaf::Fixed(b) => sheet.value(format_args!("0x{}", Hex(b))),
+        Leaf::Bytes([]) => sheet.value(format_args!("(no bytes)")),
+        Leaf::Bytes(b) if b.len() <= 32 => sheet.value(format_args!("0x{}", Hex(b))),
+        // What is signed for a `bytes` is its hash, so for one too long to read the hash
+        // is the honest thing to show.
+        Leaf::Bytes(b) => {
+            let hash = outscript::hash::keccak256_once(b);
+            sheet.value(format_args!("{} bytes, keccak256", b.len()));
+            sheet.value(format_args!("0x{}", Hex(&hash)));
+        }
+        Leaf::Str("") => sheet.value(format_args!("(empty text)")),
+        Leaf::Str(s) => {
+            for line in s.split('\n') {
+                sheet.value(format_args!("{line}"));
+            }
+        }
+        Leaf::Empty => sheet.value(format_args!("(empty list)")),
+    }
+}
+
+/// Hash the typed data and write every value of it onto `sheet`, in one pass.
+#[inline(never)]
+fn typed_sheet(
+    typed: &catcard_evm::typed::Typed<'_>,
+    sheet: &mut Sheet,
+) -> Result<catcard_evm::typed::Hashes, catcard_evm::typed::Error> {
+    use catcard_evm::typed::{Label, Part, Seg};
+    sheet.label(format_args!("message type"));
+    sheet.value(format_args!("{}", typed.primary()));
+    typed.walk(&mut |part, path, leaf| {
+        match part {
+            Part::Domain => sheet.label(format_args!("domain {}", Label(path))),
+            Part::Message => sheet.label(format_args!("{}", Label(path))),
+        }
+        let chain = part == Part::Domain && path == [Seg::Field("chainId")];
+        typed_value(sheet, chain, leaf);
+    })
+}
+
+/// Go through `sheet` a page at a time, a value never split across two, handing each page
+/// to `show`. `Ok(Some(pages))` when every page was shown and accepted, `Ok(None)` when
+/// one was not, and `Err` when a single value is more than a page holds.
+///
+/// `total` is the page count for the titles, zero while it is not yet known.
+fn pages(
+    sheet: &Sheet,
+    head: &str,
+    total: usize,
+    show: &mut dyn FnMut(&[catcard_ui::scroll::Line<'_>]) -> bool,
+) -> Result<Option<usize>, &'static str> {
+    use catcard_ui::scroll::Line;
+    use core::fmt::Write as _;
+    let spans = &sheet.spans[..];
+    let (mut at, mut page) = (0, 0);
+    while at < spans.len() {
+        page += 1;
+        let mut title: heapless::String<40> = heapless::String::new();
+        let _ = if total > 1 {
+            write!(title, "{head} {page}/{total}")
+        } else {
+            write!(title, "{head}")
+        };
+        let mut doc: heapless::Vec<Line, PAGE_ROWS> = heapless::Vec::new();
+        let _ = doc.push(Line::title(&title));
+        let mut end = at;
+        while end < spans.len() {
+            // One value: its label, and every row up to the next label.
+            let mut next = end + 1;
+            while next < spans.len() && !spans[next].label {
+                next += 1;
+            }
+            let before = doc.len();
+            let room = spans[end..next].iter().all(|span| {
+                let text = sheet.row(*span);
+                let line = if span.label {
+                    Line::body(text).small()
+                } else {
+                    Line::body(text).wrapped()
+                };
+                doc.push(line).is_ok()
+            });
+            if !room || !fits(&doc) {
+                doc.truncate(before);
+                break;
+            }
+            end = next;
+        }
+        if end == at {
+            return Err("too long to show here");
+        }
+        at = end;
+        if !show(&doc) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(page))
+}
+
+/// Sign EIP-712 typed data for a computer asking over the encrypted channel
+/// (`crate::hostwallet`), by the key at `key`. The address and the 65 bytes `r || s || v`.
+///
+/// Every value is on the screen before anything is signed: the domain, then the message,
+/// each under the name the types give it, a page at a time, and the last page says who
+/// signs. The digest comes out of the same pass that wrote those pages
+/// ([`catcard_evm::typed::Typed::walk`]), so what is signed is what was shown. Typed data
+/// that does not fit -- a value longer than a page, or more rows than there is room for --
+/// is refused.
+///
+/// What the values *mean* is not known here. A `Permit` for every token an account will
+/// ever hold reads as a spender, a number and a deadline, and the person has to know that
+/// is what a permit is.
+#[inline(never)]
+pub(crate) fn host_sign_typed(
+    gate: &catcard_callgate::Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    blob: &[u8],
+    key: &catcard_wallet::hostkeys::KeyPath,
+    ticket: u32,
+) -> Result<(Who, [u8; catcard_evm::personal::SIG_LEN]), crate::hostwallet::Outcome> {
+    use crate::hostwallet::Outcome;
+    use catcard_ui::scroll::ScrollView;
+    const HEAD: &str = "Typed data";
+
+    let typed = match catcard_evm::typed::Typed::parse(blob) {
+        Ok(typed) => typed,
+        Err(why) => return Err(Outcome::Refused(why.why())),
+    };
+    let signer = signer(gate, login, ui, "Typed data request", false, key)?;
+    let Some(mut sheet) = Sheet::new() else {
+        return Err(refuse(ui, HEAD, "not enough memory"));
+    };
+    let hashes = match typed_sheet(&typed, &mut sheet) {
+        Ok(hashes) => hashes,
+        Err(why) => return Err(refuse(ui, HEAD, why.why())),
+    };
+    sheet.label(format_args!("will be signed by"));
+    sheet.value(format_args!("{}", signer.who));
+    sheet.value(format_args!("{}", signer.path));
+    sheet.label(format_args!("Ethereum, typed data (EIP-712)"));
+    if sheet.lost {
+        return Err(refuse(ui, HEAD, "too long to show here"));
+    }
+
+    // Once to count the pages and find out whether it can be shown at all, so nobody
+    // reads three pages of something the fourth cannot hold; then for the person.
+    let total = match pages(&sheet, HEAD, 0, &mut |_| true) {
+        Ok(Some(total)) => total,
+        Ok(None) => return Err(Outcome::Declined),
+        Err(why) => return Err(refuse(ui, HEAD, why)),
+    };
+    let shown = pages(&sheet, HEAD, total, &mut |doc| {
+        let mut view = ScrollView::build(
+            doc,
+            crate::display::SCREEN_W,
+            crate::display::SCREEN_H,
+            crate::display::FONTS,
+        );
+        crate::menu::scroll_choice(ui, &mut view)
+    });
+    match shown {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(Outcome::Declined),
+        Err(why) => return Err(refuse(ui, HEAD, why)),
+    }
+    drop(sheet);
+    if !crate::usbtask::host_alive(ticket) {
+        return Err(Outcome::Declined);
+    }
+    let done = sign_digest(ui, HEAD, signer, &hashes.digest)?;
+    Ok(done)
 }

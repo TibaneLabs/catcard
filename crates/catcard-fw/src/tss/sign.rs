@@ -235,13 +235,6 @@ pub(crate) fn together(
             return None;
         }
     };
-    crate::catlog!(
-        "tss: signing {} as member {} of {} signers, {} digests",
-        card::short_id(&id).as_str(),
-        me,
-        signers.len(),
-        requests.len()
-    );
     // The invitation is on the card already, or in the starter's codes.
     if !drive::run(ui, &mut medium, &mut session, None) {
         return None;
@@ -714,6 +707,5 @@ fn psbt_flow(
             Err(_) => return refuse(ui, sink, "a signature did not fit"),
         }
     }
-    crate::catlog!("tss: {} inputs signed together", digests.len());
     crate::signtx::deliver(ui, sink, None, from, into, at, digests.len(), signable);
 }

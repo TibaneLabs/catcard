@@ -25,7 +25,7 @@ doing the work, so this route stops being available the moment CatCard is instal
 *Recovering* below for what replaces it).
 
 ```sh
-cargo fw-mk4                # the dev build (key injection + memory monitor, default)
+cargo fw-mk4                # the dev build (USB recovery + memory monitor, default)
 cargo run -p catcard-image -- build \
     target/thumbv7em-none-eabihf/release/catcard-fw \
     --board mk4 --version 7.0.0 \
@@ -223,8 +223,9 @@ anything is unknown — the emulator maps PSRAM unconditionally and cannot answe
 
 It may work: the bootloader reads a staged image from PSRAM itself, so it configures
 OCTOSPI at boot, and if it leaves that mapping in place the firmware inherits it.
-**`Debug → PSRAM` reports what is actually true on the device**, and is worth looking at
-before trusting the upgrade path with the only route back.
+The `Debug → PSRAM` screen that reported what is actually true on the device was removed
+2026-11-13 (it is in git history); check another way before trusting the upgrade path
+with the only route back.
 
 `Debug → Enter DFU` is **not** an exit on a locked unit — the bootloader locks up and
 only a power cycle clears it. The exit that does exist there is `sdcard_recovery()`, and
@@ -261,7 +262,7 @@ What the Q1 build does now:
 - **Both SD slots.** Card detect is active-low on Q1 (high on mk3/mk4), and the one
   controller is steered by `SD_MUX=PC13` (0 = A, 1 = B), both now in the board table.
 
-**A `fw-q1-ship` build has no headless fallback**, by design — it has no key injection, so
+**A `fw-q1-ship` build has no headless fallback**, by design — it has no USB recovery loop, so
 nothing over USB can approve an install. With the panel and keyboard working that is the
 normal state of a release: installs are approved at the device. But if a ship build ever
 fails to bring up the panel or keyboard it parks, and that unit can no longer be
@@ -376,7 +377,7 @@ the map once the firmware is on the device tells you that you are stuck; it does
 you out. The only thing that gets you out has to already be in the image:
 
 ```sh
-cargo fw-mk4                  # the dev build: key injection + memory monitor (default)
+cargo fw-mk4                  # the dev build: USB recovery + memory monitor (default)
 ```
 
 That build lets a host press keys over USB, so a mirrored map or a dead panel costs you
@@ -401,7 +402,7 @@ tools/usbclient.py hid out/x.bin --drive --expect-install
 [`USB.md`](USB.md#talking-to-a-real-device).
 
 It also means a host can approve its own firmware upgrade, which is why it must not
-outlive bring-up — see [`USB.md`](USB.md#key-injection-a-bring-up-crutch-with-an-expiry-date).
+outlive bring-up — see [`USB.md`](USB.md#key-injection-the-recovery-loop-only).
 The selftest screen shows `[USB KEYS]` whenever it is compiled in.
 
 ### Then check the map, to avoid bricking the secure element

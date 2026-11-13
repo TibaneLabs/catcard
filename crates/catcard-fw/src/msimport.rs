@@ -248,10 +248,13 @@ pub(crate) fn registered(
             Ok(m) => {
                 let _ = parsed.push(m);
             }
-            Err(why) => crate::catlog!("multisig: skipping {}: {:?}", w.name, why),
+            Err(why) => crate::catlog!(
+                "multisig: skipping {}: {}",
+                w.name,
+                crate::logbuf::Dbg(&why)
+            ),
         }
     }
-    crate::catlog!("multisig: {} wallet(s) registered", parsed.len());
     parsed
 }
 
@@ -319,10 +322,14 @@ pub(crate) fn registered_named(
                 parsed = Registered::with_room(1);
                 let _ = parsed.push(m);
             }
-            Err(why) => crate::catlog!("multisig: skipping {}: {:?}", list[i].name, why),
+            Err(why) => crate::catlog!(
+                "multisig: skipping {}: {}",
+                list[i].name,
+                crate::logbuf::Dbg(&why)
+            ),
         }
     }
-    crate::catlog!("multisig: wallet= {:?}", found);
+    crate::catlog!("multisig: wallet= {}", crate::logbuf::Dbg(&found));
     (found, parsed)
 }
 
@@ -466,7 +473,10 @@ fn offer_from_psbt(
     let len = match wallet.write_descriptor(buf) {
         Ok(n) => n,
         Err(why) => {
-            crate::catlog!("multisig: cannot render PSBT wallet: {:?}", why);
+            crate::catlog!(
+                "multisig: cannot render PSBT wallet: {}",
+                crate::logbuf::Dbg(&why)
+            );
             return false;
         }
     };
@@ -1511,7 +1521,6 @@ fn save(
             wallets::Error::NoChecksum => "no checksum",
             wallets::Error::Overflow => "too long",
         })?;
-        crate::catlog!("multisig: registering, {} wallet(s) after this", added);
         wallets::render(&next[..added], list_buf).map_err(|_| "too long")?
     };
     store_list(gate, login, ui, doc_buf, &list_buf[..len], seal.bytes())

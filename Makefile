@@ -15,7 +15,7 @@
 # mk5 is electrically an mk4 (an added strap and its own hw_compat bit), so a single
 # build serves both and its header claims both boards.
 #
-# The USB bench crutches (host key injection + the peek/poke/jsr memory monitor) are
+# The USB bench crutches (the USB recovery loop + the peek/poke/jsr memory monitor) are
 # default features, so a dev build carries them -- that is how the device is driven and
 # inspected during this development period. SHIP=1 passes --no-default-features to strip
 # them for a real, signed release; never ship a build without it (usb-debug-mem exposes

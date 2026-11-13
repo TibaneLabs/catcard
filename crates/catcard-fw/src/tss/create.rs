@@ -66,13 +66,6 @@ pub(super) fn create(
         Ok(s) => s,
         Err(e) => return say(ui, HEAD, "cannot start:", describe(&e)),
     };
-    crate::catlog!(
-        "tss: session {} member {} of {}, {} needed",
-        card::short_id(&id).as_str(),
-        me,
-        n,
-        t
-    );
     let invite = start.then_some(Invitation::Create { n, t });
     if !drive::run(ui, &mut medium, &mut session, invite) {
         return;

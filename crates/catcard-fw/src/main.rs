@@ -69,13 +69,14 @@ mod evmtx;
 mod export;
 /// Factory reset: PIN to blank, settings destroyed and formatted, optional reinstall.
 mod factoryreset;
-#[cfg(all(feature = "dev", feature = "usb-key-injection"))]
+#[cfg(all(feature = "dev", feature = "usb-recovery"))]
 mod failsafe;
 /// The FIDO2 security key (CTAP2 / U2F): the USB task's desk and the UI task's answers.
 mod fido;
 mod filemgmt;
 mod gatecall;
-/// Debug -> Bootloader replies: the raw return of each "0 is success" callgate.
+/// The raw return of each "0 is success" callgate, for a host that asks.
+#[cfg(feature = "usb-debug-mem")]
 mod gatecheck;
 #[cfg(feature = "board-q1")]
 mod gpu;
@@ -116,6 +117,9 @@ mod newseed;
 /// The NFC tag, where a board has one: handing a phone a URL by tap.
 #[cfg(not(feature = "board-mk3"))]
 mod nfc;
+// The SPI-NOR part: the mk3 stages upgrades and keeps its settings there. The boards
+// with internal space for both never open it.
+#[cfg(feature = "board-mk3")]
 mod nor;
 /// Secure Notes & Passwords, kept in the wallet's settings file.
 ///
@@ -168,9 +172,6 @@ mod qrscan;
 #[cfg(any(feature = "board-q1", feature = "multichain"))]
 mod qrshow;
 mod recovery;
-/// Debug: write a settings image staged by the memory monitor back over the region.
-#[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-mod restore;
 /// Raw TRNG samples over USB: the one reader behind the bench's `DebugTrng` and the
 /// paired `RngSample`.
 mod rngread;
@@ -203,10 +204,6 @@ mod splash;
 /// deliberate-trip probes are behind `usb-debug-mem`.
 mod stackguard;
 mod staging;
-/// Debug: everything this device keeps, the seed in the clear, written to a card in one
-/// file. Bench builds only: it is a diagnostic, not a backup, and it must not ship.
-#[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-mod statedump;
 /// The Q1's status bar has no counterpart on the mono boards, whose 64 rows cannot spare
 /// any and whose keypad has no modifiers to report.
 #[cfg(feature = "board-q1")]
@@ -398,11 +395,7 @@ fn main() -> ! {
     // secure elements or the display are touched -- the point a validly-signed-but-broken
     // image hangs, and where a locked unit otherwise has no way back. Not held: the
     // ordinary boot below, re-initialising the matrix this read touched.
-    #[cfg(all(
-        feature = "dev",
-        feature = "usb-key-injection",
-        not(feature = "rescue")
-    ))]
+    #[cfg(all(feature = "dev", feature = "usb-recovery", not(feature = "rescue")))]
     if failsafe::cancel_held_at_boot() {
         failsafe::run();
     }

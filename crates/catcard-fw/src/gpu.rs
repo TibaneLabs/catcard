@@ -85,14 +85,6 @@ fn probe() -> bool {
         if i2c.read(APP_ADDR, &mut reply).is_err() || reply[0] == 0xFF {
             continue;
         }
-        let len = reply
-            .iter()
-            .position(|&b| b == 0 || b == 0xFF)
-            .unwrap_or(VERSION_LEN);
-        crate::catlog!(
-            "gpu: version {}",
-            core::str::from_utf8(&reply[..len]).unwrap_or("?")
-        );
         return true;
     }
     crate::catlog!("gpu: no answer at 0x{:02x}; no activity bar", APP_ADDR);
@@ -123,7 +115,7 @@ fn send(cmd: &[u8], what: &str) -> bool {
     match i2c.write(APP_ADDR, cmd) {
         Ok(()) => true,
         Err(e) => {
-            crate::catlog!("gpu: {} refused: {:?}", what, e);
+            crate::catlog!("gpu: {} refused: {}", what, crate::logbuf::Dbg(&e));
             false
         }
     }

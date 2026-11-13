@@ -258,7 +258,6 @@ fn look_up(
         .trick_request(&g, TrickOp::GetByPin, &mut s)
         .map_err(|_| "the secure element refused")?;
     let blank = s.blank_slots & ((1 << slots::NUM_TRICKS) - 1);
-    crate::catlog!("trick: lookup {}, blank {:#06x}", rv, blank);
     Ok(((rv == 0 && s.slot().is_some()).then_some(s), blank))
 }
 

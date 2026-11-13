@@ -129,7 +129,7 @@ fn mount_card(slot: catcard_hal::sdmmc::Slot) -> Result<crate::media::Volume, &'
                 return Err(());
             }
             Err(e) => {
-                crate::catlog!("sd: card would not start: {:?}", e);
+                crate::catlog!("sd: card would not start: {}", crate::logbuf::Dbg(&e));
                 why = "card would not start";
                 return Err(());
             }
@@ -282,7 +282,11 @@ fn stage_from_volume(
         if let Err(why) = staged.write(at, &buf[..n]) {
             // The image ran past the area, or the area refused. Name it: "refused" alone
             // has already sent one person hunting for a reason nobody wrote down.
-            crate::catlog!("{}: staging write refused: {:?}", medium, why);
+            crate::catlog!(
+                "{}: staging write refused: {}",
+                medium,
+                crate::logbuf::Dbg(&why)
+            );
             return Outcome::Failed("staging write failed");
         }
         at += n as u32;
@@ -302,7 +306,7 @@ fn stage_from_volume(
             // Which check refused matters: "refused" alone has already sent one person
             // hunting through a log for a reason that was never written down. With the
             // header's own claims beside it, a refusal can be chased without the card.
-            crate::catlog!("{}: image refused: {:?}", medium, why);
+            crate::catlog!("{}: image refused: {}", medium, crate::logbuf::Dbg(&why));
             // The staged bytes and their digest: with these in the log, a signature that
             // will not verify can be chased against the file on a computer, which is the
             // only way to tell "the wrong bytes arrived" from "the wrong key was used".

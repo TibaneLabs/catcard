@@ -41,6 +41,7 @@ pub mod effects;
 pub mod link;
 pub mod literal;
 pub mod mints;
+pub mod offchain;
 
 #[cfg(test)]
 mod tests;

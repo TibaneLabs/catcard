@@ -6,8 +6,9 @@
 # run on hardware whose keypad map and display are both still unconfirmed, so it is worth
 # knowing it works before that run rather than during it.
 #
-# Needs `usb-key-injection`, which every plain `cargo fw-<board>` dev build carries by
-# default (only the `fw-<board>-ship` release builds strip it).
+# STALE since 2026-11-13: the ordinary session no longer takes keys from a host, so the
+# selftest and PIN steps here have nothing to press. Only the recovery loop (hold CANCEL
+# at power-on, `usb-recovery`) still does; this script wants rewriting around that.
 #
 # Under the emulator the final install cannot be verified -- it refills PSRAM at reset,
 # so a correctly staged image is gone before the bootloader looks. The run says so and

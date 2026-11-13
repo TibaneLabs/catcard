@@ -85,7 +85,6 @@ pub(crate) fn pixels(art: &Rgba, mut each: impl FnMut(usize, usize, [u8; 4])) {
         match crate::heap::take(SLOT * SLOTS) {
             Some(block) => {
                 cache.block = Some(block);
-                crate::catlog!("art: {} bytes of icon cache", SLOT * SLOTS);
             }
             None => cache.refused = true,
         }
@@ -189,10 +188,6 @@ pub(crate) fn indexed(art: &catcard_ui::art::Indexed, mut each: impl FnMut(usize
         match crate::heap::take(INDEXED_SLOT * INDEXED_SLOTS) {
             Some(block) => {
                 cache.block = Some(block);
-                crate::catlog!(
-                    "art: {} bytes of grid icon cache",
-                    INDEXED_SLOT * INDEXED_SLOTS
-                );
             }
             None => cache.refused = true,
         }

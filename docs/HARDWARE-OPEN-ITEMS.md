@@ -70,8 +70,8 @@ would: setting a PIN through CatCard and then logging in with it. Both halves us
 same map, so a mirrored one succeeds at both and agrees with itself.
 
 Confirmed for mk4. mk3 has the same membrane pad and the same decoder, so it is expected
-to match, but it is a different board and the `Debug → Keypad` screen settles it in
-seconds.
+to match, but it is a different board and a keypad tester settles it in seconds (the
+`Debug → Keypad` screen did, until it was removed 2026-11-13).
 
 ---
 
@@ -750,8 +750,8 @@ setup and `GPO1 = 0x85` written only when they differ, behind the all-zero I²C 
 RF on (RFSwitchOn, `RF_MNGT_Dyn = 0`, read back) and off (RFSwitchOff, `RF_OFF` read back),
 ten tries 25 ms apart. Every one of those facts is `[C]`. Before this, the driver never
 switched RF on at all -- and since the factory leaves the tag asleep (`RF_MNGT = RF_SLEEP`),
-no phone could have read anything it wrote. It is off the boot path: Debug → NFC test runs
-one whole session with a fixed link.
+no phone could have read anything it wrote. It is off the boot path. (Debug → NFC test, which ran
+one whole session with a fixed link, was removed 2026-11-13.)
 
 What the part has not yet confirmed, all `[I]`:
 

@@ -58,7 +58,6 @@ pub(crate) fn view(ui: &mut Ui<'_>, storage: Storage, path: &str) {
         Storage::Vdisk => menu::with_vdisk(|vol| show(ui, vol, path)),
     };
     if let Err(why) = outcome {
-        crate::catlog!("png: {}: {}", path, why);
         menu::message(ui.panel, HEAD, why, "any key to go back");
         menu::wait_for_any_key(ui);
     }
@@ -89,14 +88,6 @@ fn show<D: catcard_sd::fat::SectorDriver>(
     // The whole panel, status bar included: a picture is what the screen is for while
     // it is up, and the bar comes back with the menu behind it.
     let plan = catcard_png::fit(&hdr, PANEL_W, PANEL_H);
-    crate::catlog!(
-        "png: {}x{} depth {} -> {}x{}",
-        hdr.width,
-        hdr.height,
-        hdr.depth,
-        plan.w,
-        plan.h
-    );
 
     // Everything the decode needs, from the heap: no frame, the rows go to the panel.
     let (Some(mut window), Some(mut lines), Some(mut acc), Some(mut out)) = (

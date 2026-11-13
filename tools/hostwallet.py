@@ -14,7 +14,9 @@ until there is an answer. Nothing here can answer for the person.
     usbclient.py hid --address m/84h/0h/0h/0/3 [--chain btc] [--format p2wpkh] [--show]
     usbclient.py hid --sign tx.psbt --chain btc --key m/84h/0h/0h/0/3 [--key ...] [--out F]
     usbclient.py hid --sign-message "text" --key m/84h/0h/0h/0/3 [--chain btc]
-                     [--format p2wpkh] [--scheme bip137|bip322|bip322-full|eip191]
+                     [--format p2wpkh] [--scheme bip137|bip322|bip322-full|eip191|tip191|
+                     solana-offchain|solana-offchain-v0 [--app-domain HEX]]
+    usbclient.py hid --sign-typed data.json --key m/44h/60h/0h/0/0      (EIP-712)
     usbclient.py --selftest          (includes the layout checks below; no device needed)
 """
 import struct
@@ -54,11 +56,12 @@ KIND_ADDRESSES, KIND_BITCOIN, KIND_EVM, KIND_SOLANA = 1, 2, 3, 4
 KIND_ADDRESS, KIND_MESSAGE = 5, 6
 # HostAddressAt flags.
 ASK_SHOW = 1
-SCHEME = {1: "bip137", 2: "bip322", 3: "bip322-full", 4: "eip191"}
+SCHEME = {1: "bip137", 2: "bip322", 3: "bip322-full", 4: "eip191", 5: "tip191",
+          6: "eip712", 7: "solana-offchain", 8: "solana-offchain-v0"}
 SCHEME_IDS = {v: k for k, v in SCHEME.items()}
 # HostInfo bits.
 CAN = {1: "addresses", 2: "sign", 4: "messages"}
-FEATURE = {1: "address-at", 2: "sign-message"}
+FEATURE = {1: "address-at", 2: "sign-message", 4: "typed-data"}
 SESSION = {1: "paths-allowed", 2: "shared"}
 SHAPE = {1: "utxo", 2: "account"}
 FORMAT = {1: "p2pkh", 2: "p2sh-p2wpkh", 3: "p2wpkh", 4: "p2tr", 5: "evm", 6: "tron",
@@ -161,6 +164,78 @@ def message_request(chain, fmt, scheme, steps, message):
         raise ValueError(f"a message is 1..{MESSAGE_MAX} bytes")
     return (bytes([VERSION, chain, fmt, scheme]) + enc_path(steps)
             + struct.pack("<H", len(message)) + message)
+
+
+def short(text):
+    b = text.encode()
+    if len(b) > 255:
+        raise ValueError("a name is at most 255 bytes")
+    return bytes([len(b)]) + b
+
+
+def typed_value(types, ty, v):
+    """One EIP-712 value in the device's layout (crates/catcard-evm/src/typed.rs)."""
+    if ty.endswith("]"):
+        elem, _, n = ty[:-1].rpartition("[")
+        items = list(v)
+        if n and len(items) != int(n):
+            raise ValueError(f"{ty} takes {n} elements, not {len(items)}")
+        head = b"" if n else struct.pack("<H", len(items))
+        return head + b"".join(typed_value(types, elem, i) for i in items)
+    if ty in types:
+        return b"".join(typed_value(types, f["type"], v[f["name"]]) for f in types[ty])
+    if ty == "bool":
+        return bytes([1 if v else 0])
+    if ty == "string":
+        b = v.encode()
+        return struct.pack("<H", len(b)) + b
+    as_bytes = lambda x: bytes.fromhex(x[2:] if x.startswith("0x") else x) \
+        if isinstance(x, str) else bytes(x)
+    if ty == "bytes":
+        b = as_bytes(v)
+        return struct.pack("<H", len(b)) + b
+    if ty == "address":
+        b = as_bytes(v)
+        if len(b) != 20:
+            raise ValueError("an address is twenty bytes")
+        return b
+    as_int = lambda x: int(x, 0) if isinstance(x, str) else int(x)
+    if ty.startswith("bytes"):
+        b = as_bytes(v)
+        if len(b) != int(ty[5:]):
+            raise ValueError(f"{ty} takes {ty[5:]} bytes, not {len(b)}")
+        return b
+    if ty.startswith("uint"):
+        n = as_int(v)
+        if not 0 <= n < 1 << int(ty[4:]):
+            raise ValueError(f"{n} does not fit {ty}")
+        b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+        return bytes([len(b)]) + b
+    if ty.startswith("int"):
+        return as_int(v).to_bytes(int(ty[3:]) // 8, "big", signed=True)
+    raise ValueError(f"unknown type {ty!r}")
+
+
+def typed_blob(doc):
+    """What `eth_signTypedData_v4` is handed (the parsed JSON), as a HostSignMessage
+    message for scheme eip712: the types, then the domain's and the message's values."""
+    types = doc["types"]
+    names = list(types)
+    out = bytes([1, len(names)])
+    for n in names:
+        out += short(n) + bytes([len(types[n])])
+        out += b"".join(short(f["type"]) + short(f["name"]) for f in types[n])
+    out += bytes([names.index(doc["primaryType"])])
+    out += typed_value(types, "EIP712Domain", doc["domain"])
+    out += typed_value(types, doc["primaryType"], doc["message"])
+    return out
+
+
+def solana_v0_message(app_domain, text, fmt=0):
+    """A scheme solana-offchain-v0 message: [32 application domain][u8 format][text]."""
+    if len(app_domain) != 32:
+        raise ValueError("an application domain is 32 bytes")
+    return bytes(app_domain) + bytes([fmt]) + text
 
 
 def decode_address(r):
@@ -495,6 +570,49 @@ def selftest():
     assert m == {"chain": 2, "scheme": 4, "path": [44 | H, 60 | H, H, 0, 0],
                  "address": "0xAb", "signature": b"\xaa\xbb\x1b"}
     truncations_refused(decode_message, msg)
+
+    # Typed data: the example in EIP-712 itself, from its JSON to the bytes the firmware's
+    # tests pin (crates/catcard-evm/src/typed/tests.rs, MAIL) and hash to the standard's
+    # own digest.
+    person = [{"name": "name", "type": "string"}, {"name": "wallet", "type": "address"}]
+    mail = {
+        "types": {
+            "EIP712Domain": [{"name": "name", "type": "string"},
+                             {"name": "version", "type": "string"},
+                             {"name": "chainId", "type": "uint256"},
+                             {"name": "verifyingContract", "type": "address"}],
+            "Person": person,
+            "Mail": [{"name": "from", "type": "Person"}, {"name": "to", "type": "Person"},
+                     {"name": "contents", "type": "string"}]},
+        "primaryType": "Mail",
+        "domain": {"name": "Ether Mail", "version": "1", "chainId": 1,
+                   "verifyingContract": "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"},
+        "message": {
+            "from": {"name": "Cow", "wallet": "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"},
+            "to": {"name": "Bob", "wallet": "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB"},
+            "contents": "Hello, Bob!"}}
+    assert typed_blob(mail).hex() == (
+        "01030c454950373132446f6d61696e0406737472696e67046e616d6506737472696e670776657273"
+        "696f6e0775696e7432353607636861696e4964076164647265737311766572696679696e67436f6e"
+        "747261637406506572736f6e0206737472696e67046e616d6507616464726573730677616c6c6574"
+        "044d61696c0306506572736f6e0466726f6d06506572736f6e02746f06737472696e6708636f6e74"
+        "656e7473020a004574686572204d61696c0100310101cccccccccccccccccccccccccccccccccccc"
+        "cccc0300436f77cd2a3d9f938e13cd947ec05abc7fe734df8dd8260300426f62bbbbbbbbbbbbbbbb"
+        "bbbbbbbbbbbbbbbbbbbbbbbb0b0048656c6c6f2c20426f6221")
+    types = {"EIP712Domain": [], "T": []}
+    assert typed_value(types, "uint8[]", [1, "0x02"]) == bytes([2, 0, 1, 1, 1, 2])
+    assert typed_value(types, "uint256", 0) == b"\0"
+    assert typed_value(types, "int16", -2) == b"\xff\xfe"
+    assert typed_value(types, "bool[2]", [True, False]) == b"\x01\x00"
+    assert typed_value(types, "bytes", "0x0102") == b"\x02\x00\x01\x02"
+    for ty, bad in (("uint8", 256), ("bytes4", "0x00"), ("bool[2]", [True]),
+                    ("address", "0x00"), ("float", 1)):
+        try:
+            typed_value(types, ty, bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{ty} took {bad!r}")
+    assert solana_v0_message(bytes(32), b"hi", 1) == bytes(32) + b"\x01hi"
 
     # What a build answers.
     inf = bytes([1, 0b11, 0b10, 0xC0, 0x03, 2, 1, 0b111, 2, 3, 4, 9, 0b001, 1, 6])

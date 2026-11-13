@@ -40,6 +40,7 @@ pub mod rlp;
 pub mod sign;
 pub mod summary;
 pub mod tokens;
+pub mod typed;
 
 #[cfg(test)]
 mod tests;

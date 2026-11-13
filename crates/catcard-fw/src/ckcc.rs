@@ -1366,7 +1366,7 @@ impl Desk {
             .ok_or("Nowhere to stage it")?;
         let mut staged = catcard_upgrade::Staged::begin(area, &catcard_board::BOARD, offset)
             .map_err(|r| {
-                crate::catlog!("ckcc: image refused: {:?}", r);
+                crate::catlog!("ckcc: image refused: {}", crate::logbuf::Dbg(&r));
                 crate::sdupgrade::describe(r)
             })?;
         staged.stored_elsewhere();
@@ -1376,7 +1376,7 @@ impl Desk {
                 Ok(Some((staged, a)))
             }
             Err(r) => {
-                crate::catlog!("ckcc: image refused: {:?}", r);
+                crate::catlog!("ckcc: image refused: {}", crate::logbuf::Dbg(&r));
                 Err(crate::sdupgrade::describe(r))
             }
         }
@@ -1779,7 +1779,6 @@ fn learn_identity(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
             .xpub
             .push_str(core::str::from_utf8(&x[..n]).unwrap_or(""));
     }
-    crate::catlog!("ckcc: identity learnt (wallet {})", ident.xfp != 0);
     crate::usbtask::ck_set_identity(ident);
 }
 

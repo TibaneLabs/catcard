@@ -690,27 +690,15 @@ fn review_and_sign(
     // and a message that happened to parse as a transaction would be reported with
     // signatures it does not have.
     let tx = match catcard_solana::parse(bytes) {
-        Ok(tx) => {
-            crate::catlog!(
-                "solana: {} bytes, a transaction, {} of {} signed",
-                bytes.len(),
-                tx.signing().present,
-                tx.signing().required
-            );
-            tx
-        }
-        Err(first) => match catcard_solana::parse_message(bytes) {
-            Ok(tx) => {
-                crate::catlog!(
-                    "solana: {} bytes, a message ({:?} as a transaction), {} signers",
-                    bytes.len(),
-                    first,
-                    tx.signing().required
-                );
-                tx
-            }
+        Ok(tx) => tx,
+        Err(_) => match catcard_solana::parse_message(bytes) {
+            Ok(tx) => tx,
             Err(why) => {
-                crate::catlog!("solana: {} bytes, neither: {:?}", bytes.len(), why);
+                crate::catlog!(
+                    "solana: {} bytes, neither: {}",
+                    bytes.len(),
+                    crate::logbuf::Dbg(&why)
+                );
                 crate::menu::message(ui.panel, HEAD, why.why(), "any key to go back");
                 crate::menu::wait_for_any_key(ui);
                 return;
@@ -792,9 +780,9 @@ fn review_and_sign(
                 Err(why) => {
                     let head = &block.bytes()[..n.min(8)];
                     crate::catlog!(
-                        "solana: rebuilt {} bytes and {:?}; starts {:02x?}",
+                        "solana: rebuilt {} bytes and {}; starts {:02x?}",
                         n,
-                        why,
+                        crate::logbuf::Dbg(&why),
                         head
                     );
                     crate::menu::message(ui.panel, HEAD, why.why(), "any key to go back");
@@ -880,7 +868,6 @@ fn review_and_sign(
             crate::menu::wait_for_any_key(ui);
             return;
         }
-        crate::catlog!("solana: signed slot {} of {} bytes", slot, n);
 
         let (transaction, _) = block.bytes().split_at(n);
         if !hand_back(ui, transaction, &mine, &signature, request_id) {
@@ -1130,7 +1117,6 @@ pub(crate) fn host_sign(
                 break 'work Err(refuse(ui, "no slot for it"));
             }
         }
-        crate::catlog!("solana: {} signature(s) for the computer", signatures.len());
 
         let at = (n + 3) & !3;
         let Some((tx_part, result)) = rest.split_at_mut_checked(at) else {
@@ -1150,4 +1136,157 @@ pub(crate) fn host_sign(
         },
         Err(o) => o,
     }
+}
+
+/// Sign an off-chain message for a computer asking over the encrypted channel
+/// (`crate::hostwallet`), by the key at `key`: the text, the address that signs and the
+/// path on the screen, and yes or no. The address and the 64 bytes of signature.
+///
+/// What is signed is not the text but the envelope [`catcard_solana::offchain`] writes
+/// around it, which names this key as its one signer and which no transaction can be.
+/// `v0` picks the older envelope; `payload` is then the application domain and the format
+/// ahead of the text, and the application domain is on the screen with the rest.
+///
+/// The signature is verified against the key before it is handed back.
+#[inline(never)]
+pub(crate) fn host_sign_message(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    v0: bool,
+    payload: &[u8],
+    key: &catcard_wallet::hostkeys::KeyPath,
+    ticket: u32,
+) -> Result<
+    (
+        heapless::String<{ catcard_wallet::chain::address::MAX_LEN }>,
+        [u8; 64],
+    ),
+    crate::hostwallet::Outcome,
+> {
+    use crate::hostwallet::Outcome;
+    use catcard_solana::offchain::{self, Envelope};
+    use catcard_wallet::chain::{self, address as caddr};
+    const HEAD: &str = "Sign message";
+    const H: u32 = catcard_wallet::bip32::HARDENED_OFFSET;
+
+    let refuse = |ui: &mut crate::ui::Ui<'_>, why: &'static str| {
+        crate::menu::message(ui.panel, HEAD, why, "any key to go back");
+        crate::menu::wait_for_any_key(ui);
+        Outcome::Refused(why)
+    };
+
+    let (envelope, text) = match offchain::request(v0, payload) {
+        Ok(got) => got,
+        Err(why) => return Err(Outcome::Refused(why.why())),
+    };
+    let body = match catcard_evm::personal::text(text) {
+        Ok(body) => body,
+        Err(why) => return Err(Outcome::Refused(why.why())),
+    };
+
+    // SLIP-0010 takes the indices without their hardened bit, and every step is hardened
+    // (the USB task refused a request that was not).
+    let steps: heapless::Vec<u32, { catcard_wallet::hostkeys::MAX_DEPTH }> =
+        key.steps().iter().map(|s| s & !H).collect();
+    let public = match message_key(gate, login, ui, "Message request", &steps, None) {
+        Ok((public, _)) => public,
+        Err(why) => return Err(refuse(ui, why)),
+    };
+    let mut addr = [0u8; caddr::MAX_LEN];
+    let Ok(n) = caddr::from_ed25519(&chain::SOLANA, &public, &mut addr) else {
+        return Err(refuse(ui, "address failed"));
+    };
+    let mut who: heapless::String<{ caddr::MAX_LEN }> = heapless::String::new();
+    let _ = who.push_str(core::str::from_utf8(&addr[..n]).unwrap_or(""));
+    let mut path: heapless::String<{ 1 + catcard_wallet::hostkeys::MAX_DEPTH * 12 }> =
+        heapless::String::new();
+    let _ = path.push('m');
+    for step in &steps {
+        let _ = write!(path, "/{step}h");
+    }
+
+    // The application domain is thirty-two bytes the application chose; base58 is how
+    // the specification says to show it.
+    let mut app: heapless::String<64> = heapless::String::new();
+    let answer = match envelope {
+        Envelope::V1 => crate::evmtx::confirm_message(
+            ui,
+            HEAD,
+            body,
+            &who,
+            &path,
+            &["Solana off-chain message"],
+        ),
+        Envelope::V0 { application, .. } => {
+            let mut b58 = [0u8; 48];
+            let shown = outscript::base58::encode_to_slice(application, &mut b58)
+                .ok()
+                .and_then(|n| core::str::from_utf8(&b58[..n]).ok());
+            let Some(shown) = shown else {
+                return Err(refuse(ui, "could not show the application"));
+            };
+            let _ = write!(app, "for {shown}");
+            crate::evmtx::confirm_message(
+                ui,
+                HEAD,
+                body,
+                &who,
+                &path,
+                &["Solana off-chain message, v0", &app],
+            )
+        }
+    };
+    match answer {
+        Ok(true) => {}
+        Ok(false) => return Err(Outcome::Declined),
+        Err(why) => return Err(refuse(ui, why)),
+    }
+    if !crate::usbtask::host_alive(ticket) {
+        return Err(Outcome::Declined);
+    }
+
+    let total = offchain::len(&envelope, text.len());
+    let Some(mut block) = crate::heap::take(total) else {
+        return Err(refuse(ui, "not enough memory"));
+    };
+    let wrapped = &mut block.bytes()[..total];
+    if offchain::write(&envelope, &public, text, wrapped) != Some(total) {
+        return Err(refuse(ui, "could not sign"));
+    }
+    let wrapped: &[u8] = wrapped;
+    // A second seed stretch, as signing a transaction is: nothing of the key was kept
+    // while the message stood on the screen. The key that signs is the one that was
+    // shown, or nothing is handed back.
+    let sig = match message_key(gate, login, ui, HEAD, &steps, Some(wrapped)) {
+        Ok((signed_by, sig)) if signed_by == public => sig,
+        Ok(_) => return Err(refuse(ui, "could not sign")),
+        Err(why) => return Err(refuse(ui, why)),
+    };
+    if !outscript::crypto::ed25519::verify(&public, wrapped, &sig) {
+        return Err(refuse(ui, "signature did not verify"));
+    }
+    Ok((who, sig))
+}
+
+/// One pass over the seed for a message: the public half of the key at `steps`, and with
+/// `sign` its signature over those bytes (zeros without). One function for both, so the
+/// seed stretch behind it is in the image once.
+#[inline(never)]
+fn message_key(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut crate::ui::Ui<'_>,
+    head: &str,
+    steps: &[u32],
+    sign: Option<&[u8]>,
+) -> Result<([u8; 32], [u8; 64]), &'static str> {
+    crate::menu::with_seed(gate, login, ui.panel, head, |seed, kw| {
+        let node = catcard_wallet::slip10::derive(seed, steps, kw)?;
+        let sig = match sign {
+            Some(message) => outscript::crypto::ed25519::sign(node.secret(), message),
+            None => [0; 64],
+        };
+        Some((node.public_key(kw), sig))
+    })
 }

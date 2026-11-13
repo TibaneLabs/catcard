@@ -101,7 +101,6 @@ pub unsafe fn init(gate: &Callgate) {
     if !unsafe { gpio::read(pin) } {
         crate::catlog!("power: button reads PRESSED at boot -- held, or the pin is stuck");
     }
-    crate::catlog!("power: button armed, {} ms hold", HOLD_MS);
 }
 
 /// Poll the button. Never returns if it has been held long enough.
@@ -143,7 +142,6 @@ pub fn tick() {
     if !*seen_up {
         if !pressed {
             *seen_up = true;
-            crate::catlog!("power: button released, now live");
         }
         return;
     }
@@ -181,7 +179,6 @@ pub fn tick() {
             // 120 MHz, far longer than the hold being measured.
             if now.wrapping_sub(started) >= hold {
                 if gate.is_some() {
-                    crate::catlog!("power: held {} ms, powering down", HOLD_MS);
                     power_down();
                 }
                 // No callgate means nothing can cut power. Forget the press rather than

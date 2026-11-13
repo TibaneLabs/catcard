@@ -494,6 +494,13 @@ impl<'a> ScrollView<'a> {
         self.content_height().saturating_sub(self.height)
     }
 
+    /// Give the view a different height -- for a screen that keeps rows at its foot for
+    /// something of its own. The window stays inside the document.
+    pub fn set_height(&mut self, height: usize) {
+        self.height = height;
+        self.off = self.off.min(self.max_off());
+    }
+
     /// Whether the bottom of the document is on screen.
     pub fn at_end(&self) -> bool {
         self.off >= self.max_off()

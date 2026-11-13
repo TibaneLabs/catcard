@@ -90,7 +90,6 @@ pub(crate) fn install_wallet_key(key: catcard_settings::nvstore::Key) {
     if empty && crate::key::is_root() {
         // SAFETY: as above.
         unsafe { *core::ptr::addr_of_mut!(WALLET_KEY) = Some(key) };
-        crate::catlog!("settings: root wallet key primed at login");
     }
 }
 
@@ -154,13 +153,6 @@ pub(crate) fn wallet_key(
     // A passphrase wallet, and a loaded XPRV, are known by their master: the stash they
     // would be stored as is the xprv one.
     let as_xprv = crate::passphrase::is_set() || crate::key::loaded() == Some(Loaded::Xprv);
-    let kind = if crate::key::is_root() {
-        "stored stash"
-    } else if as_xprv {
-        "xprv stash"
-    } else {
-        "words stash"
-    };
     let key = if crate::key::is_root() {
         root_key(gate, login, panel, head)?
     } else if as_xprv {
@@ -180,20 +172,6 @@ pub(crate) fn wallet_key(
         stash.zeroize();
         key
     };
-    // Which file, by two bytes of the key's SHA-256: enough to tell two wallets' files
-    // apart in a log, and nothing of the key itself -- two bytes of *that* would be two
-    // bytes a reader of the log no longer has to guess.
-    let id = {
-        use purecrypto::hash::{Digest as _, Sha256};
-        Sha256::digest(key.as_bytes())
-    };
-    crate::catlog!(
-        "settings: {} key for {}, id {:02x}{:02x}",
-        kind,
-        crate::key::label(),
-        id[0],
-        id[1]
-    );
     // SAFETY: as above.
     unsafe { *core::ptr::addr_of_mut!(WALLET_KEY) = Some(key.clone()) };
     Ok(key)
@@ -243,26 +221,19 @@ pub(crate) fn open_wallet(
     let mut files = match unsafe { Files::mount_read_only() } {
         Ok(f) => f,
         Err(e) => {
-            crate::catlog!("settings: mount failed: {:?}", e);
+            crate::catlog!("settings: mount failed: {}", crate::logbuf::Dbg(&e));
             return;
         }
     };
     match store::read(&mut files, &key, buf) {
         Ok(n) => {
+            // A file under this wallet's key that names another wallet is the one case
+            // worth a line: every other outcome is the ordinary one.
             let doc = Doc::parse(&buf[..n]).unwrap_or_default();
             let mine = u64::from(u32::from_le_bytes(fp));
-            let whose = match doc.get_u64("xfp") {
-                Some(x) if x == mine => "xfp matches",
-                Some(_) => "xfp MISMATCH",
-                None => "no xfp in it",
-            };
-            crate::catlog!(
-                "settings: {} file found, {} B, {} keys, {}",
-                label,
-                n,
-                doc.len(),
-                whose
-            );
+            if doc.get_u64("xfp").is_some_and(|x| x != mine) {
+                crate::catlog!("settings: {} file found, xfp MISMATCH", label);
+            }
         }
         Err(Error::Absent) => {
             let c = store::census(&mut files, &key, buf);
@@ -276,7 +247,11 @@ pub(crate) fn open_wallet(
             );
             files.log_listing();
         }
-        Err(e) => crate::catlog!("settings: {} file unreadable: {:?}", label, e),
+        Err(e) => crate::catlog!(
+            "settings: {} file unreadable: {}",
+            label,
+            crate::logbuf::Dbg(&e)
+        ),
     }
 }
 
@@ -357,12 +332,13 @@ pub(crate) fn save_master(
     let mut files = unsafe { Files::mount() }.map_err(|_| "no settings store")?;
     let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
     match store::set_many(&mut files, &key, &[pair], choose, doc, seal) {
-        Ok(slot) => {
-            crate::catlog!("settings: {} saved to {:03x}.aes (root file)", pair.0, slot);
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err(e) => {
-            crate::catlog!("settings: saving {} failed: {:?}", pair.0, e);
+            crate::catlog!(
+                "settings: saving {} failed: {}",
+                pair.0,
+                crate::logbuf::Dbg(&e)
+            );
             Err("could not save")
         }
     }
@@ -464,12 +440,6 @@ pub(crate) fn save_wallet_many(
     // Does this file already say whose it is?
     let n = store::read(&mut files, &key, doc).unwrap_or(0);
     let known = says_whose(&doc[..n]);
-    crate::catlog!(
-        "settings: saving {} into a {} B file{}",
-        name,
-        n,
-        if known { "" } else { ", adding its identity" }
-    );
 
     let mut xfp_text: heapless::String<12> = heapless::String::new();
     let mut words_text: heapless::String<4> = heapless::String::new();
@@ -504,17 +474,13 @@ pub(crate) fn save_wallet_many(
 
     let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
     match store::set_many(&mut files, &key, &pairs, choose, doc, seal) {
-        Ok(slot) => {
-            crate::catlog!(
-                "settings: {} saved to {:03x}.aes, {} keys",
-                name,
-                slot,
-                pairs.len()
-            );
-            Ok(())
-        }
+        Ok(_) => Ok(()),
         Err(e) => {
-            crate::catlog!("settings: saving {} failed: {:?}", name, e);
+            crate::catlog!(
+                "settings: saving {} failed: {}",
+                name,
+                crate::logbuf::Dbg(&e)
+            );
             Err("could not save")
         }
     }
@@ -804,30 +770,24 @@ impl Files {
         let dir = match self.vol.open_dir("/settings") {
             Ok(d) => d,
             Err(e) => {
-                crate::catlog!("settings: /settings will not open: {:?}", e);
+                crate::catlog!(
+                    "settings: /settings will not open: {}",
+                    crate::logbuf::Dbg(&e)
+                );
                 return;
             }
         };
         let mut it = self.vol.iter_dir(dir);
-        let mut n = 0u32;
         loop {
             match it.next() {
-                Ok(Some(entry)) => {
-                    n += 1;
-                    crate::catlog!(
-                        "settings:   {} {} B",
-                        entry.name_str().unwrap_or("?"),
-                        entry.len()
-                    );
-                }
+                Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(e) => {
-                    crate::catlog!("settings:   listing stopped: {:?}", e);
+                    crate::catlog!("settings:   listing stopped: {}", crate::logbuf::Dbg(&e));
                     break;
                 }
             }
         }
-        crate::catlog!("settings: /settings lists {} entries", n);
     }
 }
 
@@ -915,7 +875,11 @@ impl Slots for Files {
             Ok(f) => f,
             Err(e) if e.is_not_found() => return Ok(None),
             Err(e) => {
-                crate::catlog!("settings: slot {} would not open: {:?}", index, e);
+                crate::catlog!(
+                    "settings: slot {} would not open: {}",
+                    index,
+                    crate::logbuf::Dbg(&e)
+                );
                 return Err(MediumError);
             }
         };
@@ -1019,11 +983,14 @@ pub(crate) unsafe fn factory_wipe(
         use fstool::fs::littlefs::{DISK_VERSION_2_0, FormatOpts};
         // SAFETY: forwarding the caller's guarantee.
         let mut blocks = unsafe { Blocks::open() }.map_err(|e| {
-            crate::catlog!("wipe: settings region will not open: {:?}", e);
+            crate::catlog!(
+                "wipe: settings region will not open: {}",
+                crate::logbuf::Dbg(&e)
+            );
             "settings will not open"
         })?;
         blocks.scrub(fill, progress).map_err(|e| {
-            crate::catlog!("wipe: overwrite failed: {:?}", e);
+            crate::catlog!("wipe: overwrite failed: {}", crate::logbuf::Dbg(&e));
             "overwrite failed"
         })?;
         // Source: docs/SECRETS-AND-SETTINGS.md, a real Q1's superblock -- version
@@ -1035,15 +1002,15 @@ pub(crate) unsafe fn factory_wipe(
             inline_max: None,
         };
         let mut vol = Volume::format_with(blocks, &opts).map_err(|e| {
-            crate::catlog!("wipe: format failed: {:?}", e);
+            crate::catlog!("wipe: format failed: {}", crate::logbuf::Dbg(&e));
             "format failed"
         })?;
         vol.create_dir("/settings").map_err(|e| {
-            crate::catlog!("wipe: /settings not created: {:?}", e);
+            crate::catlog!("wipe: /settings not created: {}", crate::logbuf::Dbg(&e));
             "could not create settings"
         })?;
         vol.unmount().map_err(|e| {
-            crate::catlog!("wipe: unmount failed: {:?}", e);
+            crate::catlog!("wipe: unmount failed: {}", crate::logbuf::Dbg(&e));
             "format did not finish"
         })?;
         Ok(())
@@ -1052,7 +1019,7 @@ pub(crate) unsafe fn factory_wipe(
     {
         // SAFETY: forwarding the caller's guarantee.
         let mut files = unsafe { Files::mount() }.map_err(|e| {
-            crate::catlog!("wipe: settings will not open: {:?}", e);
+            crate::catlog!("wipe: settings will not open: {}", crate::logbuf::Dbg(&e));
             "settings will not open"
         })?;
         files
@@ -1114,11 +1081,6 @@ pub(crate) fn migrate_battery_idle(ui: &mut crate::ui::Ui<'_>) {
         unsafe { *core::ptr::addr_of_mut!(BATT_OFF) = (false, Some(secs)) };
         crate::idle::arm_battery_off(Some(secs));
     }
-    crate::catlog!(
-        "idle: carried cat_bidle {} min over to the power-off: {}",
-        minutes,
-        if ok { "saved" } else { "not saved" }
-    );
 }
 
 /// The kill key's digit, and the enrolled 2FA cards, as the boot path read them.
@@ -1206,7 +1168,7 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
     let mut files = match unsafe { Files::mount_read_only() } {
         Ok(f) => f,
         Err(why) => {
-            crate::catlog!("nick: no settings store: {:?}", why);
+            crate::catlog!("nick: no settings store: {}", crate::logbuf::Dbg(&why));
             return prefs;
         }
     };
@@ -1215,8 +1177,8 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
         Err(e) => {
             let c = store::census(&mut files, &nvstore::prelogin_key(), blob);
             crate::catlog!(
-                "nick: pre-login settings: {:?} ({} files, {} errors, {} heads, {} open)",
-                e,
+                "nick: pre-login settings: {} ({} files, {} errors, {} heads, {} open)",
+                crate::logbuf::Dbg(&e),
                 c.files,
                 c.errors,
                 c.heads,
@@ -1231,7 +1193,11 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
     let doc = match Doc::parse(&blob[..n]) {
         Ok(d) => d,
         Err(e) => {
-            crate::catlog!("nick: {} bytes of settings would not parse: {:?}", n, e);
+            crate::catlog!(
+                "nick: {} bytes of settings would not parse: {}",
+                n,
+                crate::logbuf::Dbg(&e)
+            );
             return prefs;
         }
     };
@@ -1270,14 +1236,9 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
         *core::ptr::addr_of_mut!(SD2FA) = (cards_state, cards);
     }
     crate::catlog!(
-        "login: kill key {}, 2fa {:?}",
+        "login: kill key {}, 2fa {}",
         prefs.kill_key.is_some(),
-        cards_state
-    );
-    crate::catlog!(
-        "login: scramble {}, countdown {} min",
-        prefs.scramble,
-        prefs.countdown_minutes.unwrap_or(0)
+        crate::logbuf::Dbg(&cards_state)
     );
 
     let Some(raw) = doc.get("nick") else {
@@ -1290,7 +1251,11 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
     let len = match json::unescape(raw, nick) {
         Ok(n) => n,
         Err(e) => {
-            crate::catlog!("nick: {} byte(s) of it will not fit: {:?}", raw.len(), e);
+            crate::catlog!(
+                "nick: {} byte(s) of it will not fit: {}",
+                raw.len(),
+                crate::logbuf::Dbg(&e)
+            );
             return prefs;
         }
     };
@@ -1299,29 +1264,7 @@ pub(crate) unsafe fn load_prelogin() -> crate::pinentry::LoginPrefs<'static> {
         return prefs;
     }
     prefs.nick = core::str::from_utf8(&nick[..len]).ok();
-    crate::catlog!("nick: {} byte(s) from the pre-login settings", len);
     prefs
-}
-
-/// Debug: draw the before-login nickname screen, and hold it.
-///
-/// The boot-path screen is up for three seconds between the bootloader's warning and the
-/// PIN prompt, which is long enough to read and short enough to argue about. This draws the
-/// same thing from the menu and waits, so what it looks like is a question that can be
-/// answered rather than caught.
-pub(crate) fn show_nickname_screen(ui: &mut crate::ui::Ui<'_>) {
-    // SAFETY: foreground only, as the boot path's call is.
-    let nick = unsafe { load_prelogin() }.nick;
-    match nick {
-        Some(text) => {
-            crate::pinentry::show_nickname(ui.panel, ui.matrix, ui.drbg, text);
-            crate::menu::wait_for_any_key(ui);
-        }
-        None => {
-            crate::menu::message(ui.panel, "Nickname", "none set", "or it would not read");
-            crate::menu::wait_for_any_key(ui);
-        }
-    }
 }
 
 /// Copy the whole settings region to a card, byte for byte.
@@ -1363,7 +1306,6 @@ pub(crate) fn backup_to_card(ui: &mut crate::ui::Ui<'_>) {
     match crate::menu::write_card_file("/settings.img", bytes) {
         Ok(()) => {
             let _ = write!(note, "{} KB written", len / 1024);
-            crate::catlog!("settings: {} bytes copied to /settings.img", len);
             crate::menu::message(ui.panel, "Settings to SD", "/settings.img", note.as_str());
         }
         Err(why) => {
@@ -1504,7 +1446,10 @@ fn save_prelogin(ui: &mut crate::ui::Ui<'_>, head: &str, name: &str, text: &str)
     let mut files = match unsafe { Files::mount() } {
         Ok(f) => f,
         Err(why) => {
-            crate::catlog!("prelogin: mount for writing failed: {:?}", why);
+            crate::catlog!(
+                "prelogin: mount for writing failed: {}",
+                crate::logbuf::Dbg(&why)
+            );
             return false;
         }
     };
@@ -1527,12 +1472,13 @@ fn save_prelogin(ui: &mut crate::ui::Ui<'_>, head: &str, name: &str, text: &str)
     let choose = ui.drbg.below(SLOT_COUNT).unwrap_or(0);
     let key = nvstore::prelogin_key();
     match store::set(&mut files, &key, name, text, choose, doc, seal) {
-        Ok(slot) => {
-            crate::catlog!("prelogin: {} saved to slot {:03x}", name, slot);
-            true
-        }
+        Ok(_) => true,
         Err(e) => {
-            crate::catlog!("prelogin: saving {} failed: {:?}", name, e);
+            crate::catlog!(
+                "prelogin: saving {} failed: {}",
+                name,
+                crate::logbuf::Dbg(&e)
+            );
             false
         }
     }

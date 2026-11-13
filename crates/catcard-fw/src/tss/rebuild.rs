@@ -31,8 +31,8 @@ const HEAD: &str = "Rebuild setup";
 
 /// What a look for this member's pair cache found.
 pub(super) enum Loaded {
-    /// Pairs with these members, from the current cache.
-    Pairs(Vec<u8>),
+    /// The current cache, read and in place.
+    Pairs,
     /// No cache on that medium, or none written yet.
     Nothing,
     /// A cache that is not the current one, or not this device's.
@@ -61,7 +61,7 @@ pub(super) fn load_cache(
     busy.take();
     drop(file);
     match got {
-        Ok(peers) => Ok(Loaded::Pairs(peers)),
+        Ok(_) => Ok(Loaded::Pairs),
         Err(Error::Cache(r)) => Ok(Loaded::Refused(r)),
         Err(e) => Err(describe(&e)),
     }
@@ -136,9 +136,7 @@ pub(super) fn rebuild(
     // The pairs this member already has, so only the missing ones need a session. A
     // cache that is gone or out of date is the usual case here, not an error.
     match load_cache(ui, storage, &mut record, &key) {
-        Ok(Loaded::Pairs(peers)) => {
-            crate::catlog!("tss: setup read, pairs with {} members", peers.len());
-        }
+        Ok(Loaded::Pairs) => {}
         Ok(Loaded::Nothing) => {}
         Ok(Loaded::Refused(r)) => say(ui, HEAD, "the setup found is", refusal(r)),
         Err(why) => say(ui, HEAD, "no setup read:", why),
@@ -203,12 +201,6 @@ pub(super) fn rebuild(
         Ok(s) => s,
         Err(e) => return say(ui, HEAD, "cannot start:", describe(&e)),
     };
-    crate::catlog!(
-        "tss: pair setup {} member {} of {} members",
-        card::short_id(&id).as_str(),
-        me,
-        members.len()
-    );
     let invite = start.then_some(Invitation::Pairs {
         wallet,
         members: drive::set_of(&members),

@@ -1167,7 +1167,6 @@ fn export(
     menu::card_wait(ui.panel, H, "writing");
     match menu::write_storage_file(storage, path, &buf[start..start + len]) {
         Ok(()) => {
-            crate::catlog!("notes: exported {} to {}", path, storage.medium());
             menu::message(ui.panel, "Exported", &path[1..], "any key to go back");
         }
         Err(why) => {
@@ -1380,7 +1379,6 @@ pub(crate) fn merge_array(
             let mut b = heapless::String::<32>::new();
             let _ = write!(a, "added {}, replaced {}", add.len(), replace.len());
             let _ = write!(b, "skipped {}, unreadable {}", skipped, unreadable);
-            crate::catlog!("notes: import {}; {}", a.as_str(), b.as_str());
             if overflow {
                 b.clear();
                 let _ = b.push_str("some left out: store full");
@@ -1462,7 +1460,6 @@ fn sign_note(
     menu::card_wait(ui.panel, H, "writing");
     match menu::write_storage_file(storage, &path, file.as_bytes()) {
         Ok(()) => {
-            crate::catlog!("notes: signed note written");
             menu::message(ui.panel, "Signed", &path[1..], "any key to go back");
         }
         Err(why) => menu::message(ui.panel, "Write failed", why, "any key to go back"),
@@ -1510,9 +1507,7 @@ fn apply_passphrase(
     if !menu::confirmed(ui) {
         return;
     }
-    if crate::passphrase::apply(gate, login, ui, item.password) {
-        crate::catlog!("notes: password applied as passphrase");
-    }
+    if crate::passphrase::apply(gate, login, ui, item.password) {}
 }
 
 // ---------------------------------------------------------------------------

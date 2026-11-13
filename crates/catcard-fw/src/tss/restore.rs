@@ -143,7 +143,6 @@ pub(super) fn restore_words(gate: &Callgate, login: &mut catcard_pin::Login, ui:
         needed = Some(parts.t);
         let _ = members.push(parts.member);
         texts.push(Zeroizing::new(String::from(parts.codex32)));
-        crate::catlog!("tss: restore, share {} in", parts.member);
     }
 
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();

@@ -87,10 +87,16 @@ pub unsafe fn init() {
         // contract is that this runs once before any allocation.
         unsafe { heap.init(core::ptr::addr_of_mut!(REGION).cast::<u8>(), SIZE) };
     });
-    crate::catlog!("heap: {} bytes", SIZE);
 }
 
-/// Bytes in use, the most ever in use, and the region's size.
+/// Bytes in use, the most ever in use, and the region's size. For the threshold-signing
+/// bench, which is the one thing that still asks.
+#[cfg(all(
+    feature = "tss",
+    feature = "usb-debug-mem",
+    not(feature = "board-mk3"),
+    not(feature = "board-q1")
+))]
 pub fn stats() -> (usize, usize, usize) {
     with(|heap| (heap.used(), heap.high_water(), heap.size()))
 }
@@ -439,11 +445,6 @@ fn claim_spare() -> bool {
                     // and added once -- `SPARE` makes sure of the last part.
                     unsafe { heap.add_region(part.base as *mut u8, part.len as usize) };
                 });
-                crate::catlog!(
-                    "heap: +{} bytes of spare RAM at {:#010x}",
-                    part.len,
-                    part.base
-                );
                 added = true;
             }
             if added { Spare::Added } else { Spare::None }
@@ -487,7 +488,6 @@ pub fn borrow_app_area() -> Option<AppArea> {
         // while it is lent.
         unsafe { heap.add_region(base as *mut u8, len as usize) };
     });
-    crate::catlog!("heap: +{} bytes of app area lent", len);
     Some(AppArea { base, len })
 }
 

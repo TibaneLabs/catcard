@@ -230,7 +230,6 @@ pub(crate) fn format_ram_disk(ui: &mut Ui<'_>) {
     let _busy = menu::blocking_screen(ui.panel, HEAD, "blanking");
     match crate::vdisk::wipe_and_format() {
         Ok(()) => {
-            crate::catlog!("vdisk: blanked and formatted from the menu");
             menu::message(ui.panel, HEAD, "done", "the disk is empty");
         }
         Err(why) => {

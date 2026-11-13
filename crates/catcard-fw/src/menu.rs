@@ -86,40 +86,15 @@ enum Screen {
     SdInstall,
     /// Debug: restart the device through the bootloader, after asking.
     WarmReset,
-    /// Debug: the settings volume and the seed, to a card, in the clear. Bench builds
-    /// only, like the restore it pairs with.
-    #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-    DumpState,
-    /// Debug: a settings image the host staged in PSRAM, written back over the region.
-    #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-    RestoreSettings,
-    /// Debug: what the scanner answers, per rate, in raw bytes.
-    #[cfg(feature = "board-q1")]
-    QrProbe,
-    /// Debug: the DMA-driven bar, run around a real callgate before it goes on the
-    /// boot path.
-    #[cfg(feature = "board-q1")]
-    SweepTest,
     Debug,
-    Usb,
-    Clocks,
-    Psram,
-    PsramProbe,
-    /// SPI-NOR flash probe (mk3): show the JEDEC id and size.
-    Sflash,
     Sd,
     Boot,
+    /// Debug: the SP 800-90B start-up test on every source, on demand (`crate::trngtest`).
+    TrngStartup,
     Selftest,
-    Keypad,
     /// The UI DRBG's diagnostic counters: how many times it has been (re)seeded, and how
     /// much it has generated.
     PrngStatus,
-    /// The RTC registers, resampled about thirty times a second.
-    Rtc,
-    /// The scheduler's live state, once the menu itself runs as a kernel task.
-    Kernel,
-    ScrollTest,
-    Colours,
     Logs,
     SaveLog,
     Utils,
@@ -128,15 +103,6 @@ enum Screen {
     /// Generate a single-use paper wallet, unrelated to the device seed, to microSD.
     #[cfg(not(feature = "board-mk3"))]
     PaperWallet,
-    ViewTrngWords,
-    /// Debug: the SP 800-90B start-up test on every source, on demand (`crate::trngtest`).
-    TrngStartup,
-    GateCheck,
-    /// Debug: write a fixed URL to the NFC tag and hold the screen.
-    #[cfg(not(feature = "board-mk3"))]
-    NfcTest,
-    /// Debug: type a fixed line into the host as a USB keyboard.
-    KbdTest,
     /// Stock's NFC Tools drawer: everything the tag can carry in or out, in one list.
     #[cfg(not(feature = "board-mk3"))]
     NfcTools,
@@ -255,8 +221,6 @@ enum Screen {
     /// would need a chunked writer, so it is not offered there.
     #[cfg(not(feature = "board-mk3"))]
     SettingsToSd,
-    /// The before-login nickname screen, drawn from the menu so it can be looked at.
-    NickPreview,
     /// Secure Notes & Passwords, read out of the settings blob. Q1 only: stock writes
     /// them where there is a keyboard to type them on.
     #[cfg(feature = "board-q1")]
@@ -1104,38 +1068,14 @@ const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter"];
 #[cfg(feature = "games")]
 const GAMES_ITEMS: &[&str] = &["Block Mine", "Block Cutter", "Flappy Cat"];
 const DEBUG_ITEMS: &[&str] = &[
-    // The TRNG's raw output as words: for checking the generator, not for keeping.
-    "View TRNG Words",
+    "Boot report",
     // The start-up health test, run here before it is trusted on the boot path.
     "TRNG startup test",
-    // What the bootloader returns from the gates read as "0 is success".
-    "Bootloader replies",
-    #[cfg(not(feature = "board-mk3"))]
-    "NFC test",
-    "Keyboard EMU test",
-    #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-    "Dump state",
-    #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-    "Restore settings",
-    #[cfg(feature = "board-q1")]
-    "QR probe",
-    #[cfg(feature = "board-q1")]
-    "Sweep test",
-    "USB",
-    "Clocks",
-    "RTC",
-    "Kernel",
-    "Scroll test",
-    "PSRAM",
-    "SPI-NOR",
-    "Boot report",
     "Selftest",
-    "Keypad",
     "PRNG status",
     "microSD",
     "Logs",
     "Save log to SD",
-    "Colours",
     // The two rows that end the session, together at the bottom: one restarts the device,
     // the other clears the PIN. Both ask first, and only one of them is irreversible.
     // Stock keeps its `Warm Reset` in the developer drawer too.
@@ -1145,9 +1085,6 @@ const DEBUG_ITEMS: &[&str] = &[
     "Settings store",
     #[cfg(not(feature = "board-mk3"))]
     "Settings to SD",
-    "Nickname screen",
-    #[cfg(feature = "board-q1")]
-    "Secure notes",
 ];
 
 /// Run the menu. Never returns.
@@ -1190,17 +1127,8 @@ pub fn run(session: Session<'_>) -> ! {
         drbg_stats: drbg.stats(),
         drbg_sample: None,
         menu: MenuScreen::new(),
-        raw_kn: None,
-        raw_held: 0,
-        rtc: RtcWatch::default(),
-        kernel_pace: Pace::default(),
         no_seed,
     };
-
-    // About thirty frames a second. Taken from the running clock rather than assumed, so
-    // a board on a different HCLK still redraws at the same rate.
-    // SAFETY: reads RCC.
-    let frame_cycles = unsafe { catcard_hal::clock::hclk_hz() } / 30;
 
     let mut pad = Keypad::new();
     // One bundle for the session. Every screen takes this instead of four
@@ -1254,9 +1182,6 @@ pub fn run(session: Session<'_>) -> ! {
         // `goto_top_menu`: "HSM active -> HSM UX object" [C]
         #[cfg(not(feature = "board-mk3"))]
         if crate::ckcc::hsm_active() {
-            if screen == Screen::Colours {
-                display::wipe(ui.panel);
-            }
             crate::hsm::run(gate, login, &mut ui);
             // HSM mode replaced the menus rather than opening from one: it lands on the
             // main menu, at the top, with nothing to go back to.
@@ -1287,18 +1212,7 @@ pub fn run(session: Session<'_>) -> ! {
             // Snapshot the DRBG's counters so the PRNG-status screen shows the current
             // numbers; cheap and side-effect-free on any other screen.
             v.drbg_stats = ui.drbg.stats();
-            #[cfg(feature = "dev")]
-            let t0 = catcard_hal::dwt::cycles();
             draw(ui.panel, screen, &v);
-            #[cfg(feature = "dev")]
-            if items_of(screen, v.blank()).is_some() {
-                // SAFETY: reads RCC.
-                let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
-                crate::catlog!(
-                    "menu draw: {} us",
-                    catcard_hal::dwt::cycles().wrapping_sub(t0) / per_us
-                );
-            }
             redraw = false;
         }
 
@@ -1323,41 +1237,12 @@ pub fn run(session: Session<'_>) -> ! {
         }
         display::idle(ui.panel);
 
-        // The RTC screen redraws on a clock rather than on input: it is showing something
-        // that changes on its own, and the whole question it answers is whether it does.
-        if screen == Screen::Rtc && v.rtc.sample(frame_cycles) {
-            redraw = true;
-        }
-        if screen == Screen::Kernel && v.kernel_pace.due(frame_cycles) {
-            redraw = true;
-        }
-
-        // The tester repaints on raw matrix state, not on events: the keys that produce
-        // no event are exactly the ones it is needed for.
-        if screen == Screen::Keypad {
-            let (kn, held) = (ui.pad.last_pressed(), ui.pad.held_mask());
-            if kn != v.raw_kn || held != v.raw_held {
-                v.raw_kn = kn;
-                v.raw_held = held;
-                redraw = true;
-            }
-        }
-
         crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
 
         // An upgrade that passed inspection is waiting on a person, wherever they are.
         //
-        // **Checked after the keys are read, not before.** With USB serviced by its own
-        // task, the offer can become pending between a check made earlier in this loop
-        // and the key read -- and a host approving over USB injects its Confirm the moment
-        // the offer's reply arrives. That Confirm was then read with no offer showing and
-        // dispatched to whichever menu item was selected, while the install waited forever.
-        //
-        // Ordering closes it without a lock: the offer is marked pending before its reply
-        // goes out, and the host injects only after the reply. So by the time an injected
-        // key has been read, the offer is already pending, and this check routes the key
-        // to it. Single-threaded it is equally correct, since pump, read and check still
-        // happen in order.
+        // Checked after the keys are read, so a key pressed as the offer arrives is routed
+        // to the offer rather than to whichever menu row was selected.
         // An image arriving over USB takes the screen for as long as it is arriving: it
         // says what is happening, how far along it is, and that cancel stops it. Stock does
         // the same, and the alternative -- a device that looks idle while a host writes a
@@ -1369,9 +1254,6 @@ pub fn run(session: Session<'_>) -> ! {
                 ((done as u64 * 100) / total as u64) as u8
             };
             if receiving != Some(pct) {
-                if receiving.is_none() && screen == Screen::Colours {
-                    display::wipe(ui.panel);
-                }
                 receiving = Some(pct);
                 let mut note = Line::new();
                 let _ = write!(note, "{} of {} KB", done / 1024, total / 1024);
@@ -1395,9 +1277,6 @@ pub fn run(session: Session<'_>) -> ! {
         // It is answered in a flow of its own, which returns here when the person has.
         if !showing_offer && receiving.is_none() && usbtask::host_waiting() {
             keys.clear();
-            if screen == Screen::Colours {
-                display::wipe(ui.panel);
-            }
             crate::hostwallet::serve(gate, login, &mut ui);
             redraw = true;
             continue;
@@ -1405,9 +1284,6 @@ pub fn run(session: Session<'_>) -> ! {
         // The same for a ckcc-mode computer (`crate::ckcc`).
         if !showing_offer && receiving.is_none() && crate::ckcc::pending() {
             keys.clear();
-            if screen == Screen::Colours {
-                display::wipe(ui.panel);
-            }
             crate::ckcc::serve(gate, login, &mut ui);
             redraw = true;
             continue;
@@ -1415,9 +1291,6 @@ pub fn run(session: Session<'_>) -> ! {
         // A paired computer asking to read the random sources (`crate::rngshare`).
         if !showing_offer && receiving.is_none() && crate::rngshare::pending() {
             keys.clear();
-            if screen == Screen::Colours {
-                display::wipe(ui.panel);
-            }
             crate::rngshare::serve(&mut ui);
             redraw = true;
             continue;
@@ -1425,9 +1298,6 @@ pub fn run(session: Session<'_>) -> ! {
         // And for a browser asking the security key (`crate::fido`).
         if !showing_offer && receiving.is_none() && crate::fido::pending() {
             keys.clear();
-            if screen == Screen::Colours {
-                display::wipe(ui.panel);
-            }
             crate::fido::serve(gate, login, &mut ui);
             redraw = true;
             continue;
@@ -1435,9 +1305,6 @@ pub fn run(session: Session<'_>) -> ! {
 
         if let Some(a) = usbtask::pending() {
             if !showing_offer {
-                if screen == Screen::Colours {
-                    display::wipe(ui.panel);
-                }
                 crate::session::show_offer(gate, ui.panel, &a);
                 showing_offer = true;
             }
@@ -1454,9 +1321,6 @@ pub fn run(session: Session<'_>) -> ! {
         if blocked != showing_blocked {
             match blocked {
                 Some(n) => {
-                    if showing_blocked.is_none() && screen == Screen::Colours {
-                        display::wipe(ui.panel);
-                    }
                     crate::pairing::show_blocked(ui.panel, n);
                 }
                 None => redraw = true,
@@ -1471,9 +1335,6 @@ pub fn run(session: Session<'_>) -> ! {
         if pair != showing_pair {
             match pair {
                 Some(p) => {
-                    if showing_pair.is_none() && screen == Screen::Colours {
-                        display::wipe(ui.panel);
-                    }
                     crate::pairing::show(ui.panel, p.code);
                 }
                 None => redraw = true,
@@ -1536,7 +1397,10 @@ pub fn run(session: Session<'_>) -> ! {
                                 redraw = true;
                             }
                             Err(why) => {
-                                crate::catlog!("install: commit refused: {:?}", why);
+                                crate::catlog!(
+                                    "install: commit refused: {}",
+                                    crate::logbuf::Dbg(&why)
+                                );
                                 message(
                                     ui.panel,
                                     "Not installed",
@@ -1585,45 +1449,15 @@ pub fn run(session: Session<'_>) -> ! {
                 continue;
             }
 
-            let prev_key = v.last_key;
             v.last_key = Some(*key);
             v.keys_seen = v.keys_seen.saturating_add(1);
             redraw = true;
 
-            // The live debug screens (keypad tester, PRNG status) stay open and repaint on
-            // each key instead of leaving on the first. `x` returns to Debug -- and on the
-            // keypad tester it takes two `x` in a row, so a single `x` still registers as a
-            // key to test. Every other key just refreshes the numbers above.
-            if matches!(
-                screen,
-                Screen::Keypad | Screen::PrngStatus | Screen::Rtc | Screen::Kernel
-            ) {
-                // `0` arms the keypad edge path by hand, on a board where the boot path
-                // leaves it masked. If it misbehaves the cure is a power cycle: nothing
-                // here is persisted, which is the whole reason it is offered from a screen
-                // rather than done at boot.
-                if screen == Screen::Keypad && *key == Key::Digit(0) {
-                    let (_, armed, _) = crate::keypad::edge_stats();
-                    if armed {
-                        ui.matrix.disarm_edge_now();
-                        crate::catlog!("keypad: edge entropy masked by hand");
-                    } else {
-                        let ok = ui.matrix.arm_edge_now();
-                        crate::catlog!(
-                            "keypad: edge entropy {}",
-                            if ok {
-                                "armed by hand"
-                            } else {
-                                "refused (storm guard)"
-                            }
-                        );
-                    }
-                    redraw = true;
-                }
-                let leave = match screen {
-                    Screen::Keypad => *key == Key::Cancel && prev_key == Some(Key::Cancel),
-                    _ => *key == Key::Cancel,
-                };
+            // The live PRNG status screen stays open and repaints on each key instead of
+            // leaving on the first. `x` returns to Debug; every other key refreshes the
+            // numbers.
+            if screen == Screen::PrngStatus {
+                let leave = *key == Key::Cancel;
                 if leave {
                     go_back(&mut nav, &mut screen, &mut v);
                 }
@@ -1738,11 +1572,6 @@ pub fn run(session: Session<'_>) -> ! {
                 }
                 break;
             }
-            // The colour chart painted the panel directly, behind the canvas and its row
-            // cache, so the next frame has to go out whole or the chart stays under it.
-            if screen == Screen::Colours && next != Screen::Colours {
-                display::wipe(ui.panel);
-            }
             if next == Screen::Back {
                 go_back(&mut nav, &mut screen, &mut v);
                 continue;
@@ -1756,17 +1585,10 @@ pub fn run(session: Session<'_>) -> ! {
                 // A new list starts at the top. Carrying a cursor between menus of
                 // different lengths is how you land on an item nobody chose.
                 v.reset_menu();
-                // Entering a live debug screen: clear the key trail so the keypad tester
-                // opens on "press any key" rather than the `y` that selected it, and its
-                // count starts at zero.
-                if matches!(next, Screen::Keypad | Screen::PrngStatus) {
+                // Entering the live PRNG screen: its key count starts at zero.
+                if next == Screen::PrngStatus {
                     v.last_key = None;
                     v.keys_seen = 0;
-                }
-                // A fresh watch, so "seconds seen" counts from opening the screen
-                // rather than from boot.
-                if next == Screen::Rtc {
-                    v.rtc = RtcWatch::default();
                 }
             }
             screen = next;
@@ -1895,14 +1717,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::HsmWipe => returns(|a| crate::hsm::wipe_screen(a.ui)),
         #[cfg(feature = "multichain")]
         Screen::ChainSettings => returns(|a| chain_settings(a.gate, a.login, a.ui)),
-        #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-        Screen::DumpState => returns(|a| crate::statedump::screen(a.gate, a.login, a.ui)),
-        #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-        Screen::RestoreSettings => returns(|a| crate::restore::screen(a.gate, a.login, a.ui)),
-        #[cfg(feature = "board-q1")]
-        Screen::QrProbe => returns(|a| crate::qrscan::probe(a.ui)),
-        #[cfg(feature = "board-q1")]
-        Screen::SweepTest => returns(|a| sweep_test(a.gate, a.login, a.ui)),
         Screen::SaveLog => returns(|a| save_log_to_card(a.ui)),
         Screen::Logs => returns(|a| {
             page_through(a.ui, "Logs", &LogLines, false, &display::LAYOUT, false);
@@ -1911,12 +1725,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::UsbDrive => returns(|a| usb_drive(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
         Screen::PaperWallet => returns(|a| crate::paperwallet::create(a.ui, a.pool.take())),
-        Screen::ViewTrngWords => returns(|a| crate::newseed::view_trng_words(a.gate, a.ui)),
-        Screen::TrngStartup => returns(|a| crate::trngtest::screen(a.gate, a.ui)),
-        Screen::GateCheck => returns(|a| crate::gatecheck::screen(a.gate, a.ui)),
-        #[cfg(not(feature = "board-mk3"))]
-        Screen::NfcTest => returns(|a| crate::nfc::probe_screen(a.ui)),
-        Screen::KbdTest => returns(|a| crate::usbkbd::self_test(a.ui)),
         Screen::AddressExplorer => returns(|a| addresses(a.gate, a.login, a.ui)),
         Screen::ExportOne(_) => returns(|a| export_one(a.gate, a.login, a.ui, a.words)),
         Screen::ExportKeyExpr => returns(|a| export_key_expression(a.gate, a.login, a.ui)),
@@ -1971,7 +1779,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::SecureLogout => returns(|a| secure_logout(a.gate, a.login, a.ui)),
         // Both take the CPU for good once they start; they return only to refuse a
         // second start when the kernel is already running.
-        Screen::ScrollTest => returns(|a| scroll_test(a.ui)),
         Screen::SettingsStore => returns(|a| crate::settings::inspect(a.gate, a.login, a.ui)),
         Screen::Nickname => returns(|a| crate::settings::edit_nickname(a.ui)),
         #[cfg(feature = "board-q1")]
@@ -1991,7 +1798,6 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::TssJoin => returns(|a| crate::tss::join_signing(a.gate, a.login, a.ui)),
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => returns(|a| crate::settings::backup_to_card(a.ui)),
-        Screen::NickPreview => returns(|a| crate::settings::show_nickname_screen(a.ui)),
         // Reached from the main-menu tile, from Settings and from the Debug drawer, so it
         // goes back to whichever opened it.
         #[cfg(feature = "board-q1")]
@@ -2096,6 +1902,7 @@ fn action_for(screen: Screen) -> Option<Action> {
         Screen::DfuUpgrade => returns(|a| crate::identity::dfu_upgrade(a.gate, a.ui)),
         Screen::SettingsSpace => returns(|a| crate::identity::settings_space(a.ui)),
         Screen::FactoryReset => returns(|a| crate::factoryreset::run(a.gate, a.login, a.ui)),
+        Screen::TrngStartup => returns(|a| crate::trngtest::screen(a.gate, a.ui)),
         _ => return None,
     })
 }
@@ -2273,8 +2080,6 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
             (Key::Confirm, Some("Menu wrapping")) => Screen::MenuWrap,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("LCD brightness")) => Screen::Brightness,
-            #[cfg(feature = "board-q1")]
-            (Key::Confirm, Some("Secure notes")) => Screen::Notes,
             _ => Screen::Settings,
         },
         Screen::Hardware => match (key, HARDWARE_ITEMS.get(cursor).copied()) {
@@ -2435,51 +2240,21 @@ fn step(screen: Screen, key: Key, cursor: usize, no_seed: bool) -> Screen {
         // until it moved to Utils -- and an index table would silently point at the wrong
         // entry.
         Screen::Debug => match (key, DEBUG_ITEMS.get(cursor).copied()) {
-            (Key::Confirm, Some("View TRNG Words")) => Screen::ViewTrngWords,
             (Key::Confirm, Some("TRNG startup test")) => Screen::TrngStartup,
-            (Key::Confirm, Some("Bootloader replies")) => Screen::GateCheck,
-            #[cfg(not(feature = "board-mk3"))]
-            (Key::Confirm, Some("NFC test")) => Screen::NfcTest,
-            (Key::Confirm, Some("Keyboard EMU test")) => Screen::KbdTest,
-            #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-            (Key::Confirm, Some("Dump state")) => Screen::DumpState,
-            #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-            (Key::Confirm, Some("Restore settings")) => Screen::RestoreSettings,
-            #[cfg(feature = "board-q1")]
-            (Key::Confirm, Some("QR probe")) => Screen::QrProbe,
-            #[cfg(feature = "board-q1")]
-            (Key::Confirm, Some("Sweep test")) => Screen::SweepTest,
-            (Key::Confirm, Some("USB")) => Screen::Usb,
-            (Key::Confirm, Some("Clocks")) => Screen::Clocks,
-            (Key::Confirm, Some("RTC")) => Screen::Rtc,
-            (Key::Confirm, Some("Kernel")) => Screen::Kernel,
-            (Key::Confirm, Some("Scroll test")) => Screen::ScrollTest,
             (Key::Confirm, Some("Settings store")) => Screen::SettingsStore,
             #[cfg(not(feature = "board-mk3"))]
             (Key::Confirm, Some("Settings to SD")) => Screen::SettingsToSd,
-            (Key::Confirm, Some("Nickname screen")) => Screen::NickPreview,
             #[cfg(feature = "board-q1")]
             (Key::Confirm, Some("Secure notes")) => Screen::Notes,
-            (Key::Confirm, Some("PSRAM")) => Screen::Psram,
-            (Key::Confirm, Some("SPI-NOR")) => Screen::Sflash,
             (Key::Confirm, Some("Boot report")) => Screen::Boot,
             (Key::Confirm, Some("Selftest")) => Screen::Selftest,
-            (Key::Confirm, Some("Keypad")) => Screen::Keypad,
             (Key::Confirm, Some("PRNG status")) => Screen::PrngStatus,
             (Key::Confirm, Some("microSD")) => Screen::Sd,
             (Key::Confirm, Some("Logs")) => Screen::Logs,
             (Key::Confirm, Some("Save log to SD")) => Screen::SaveLog,
-            (Key::Confirm, Some("Colours")) => Screen::Colours,
             (Key::Confirm, Some("Warm Reset")) => Screen::WarmReset,
             (Key::Confirm, Some("Factory Reset")) => Screen::FactoryReset,
             _ => Screen::Debug,
-        },
-        // The probe is reached by pressing the tick on the PSRAM screen, never by
-        // arriving there. An unmapped read faults and a fault needs a power cycle, so
-        // the risk is worth taking deliberately and not by navigation.
-        Screen::Psram => match key {
-            Key::Confirm => Screen::PsramProbe,
-            _ => Screen::Back,
         },
         // Every info screen leaves on any key, back to where it was opened from.
         //
@@ -2535,16 +2310,6 @@ struct View<'a> {
     drbg_sample: Option<u32>,
     /// The list screen's own state: where the cursor is and how far the view is scrolled.
     menu: MenuScreen,
-    /// The last raw matrix position pressed, and which positions are held, for the
-    /// keypad tester. Raw rather than decoded: the modifiers, the lamp and the two
-    /// hardware keys decode to nothing, and a tester that showed only decoded keys made
-    /// them look dead on the one screen meant to tell dead from unmapped.
-    raw_kn: Option<usize>,
-    raw_held: u64,
-    /// The RTC debug screen's sampler.
-    rtc: RtcWatch,
-    /// The kernel status screen's repaint pacer.
-    kernel_pace: Pace,
     /// The bootloader's answer at login: no secret has been written to the slot.
     no_seed: bool,
 }
@@ -2707,12 +2472,8 @@ impl MenuScreen {
             }
             return;
         }
-        #[cfg(feature = "dev")]
-        let t0 = catcard_hal::dwt::cycles();
         let (title, note) = menu_head(screen, blank);
         let mut view = build_menu_view(title, note.as_str(), items, self.off, self.cursor);
-        #[cfg(feature = "dev")]
-        let t1 = catcard_hal::dwt::cycles();
         let old = view.off();
         match k {
             // `0` jumps back to the top, the arrows move one row.
@@ -2727,20 +2488,6 @@ impl MenuScreen {
         // Animate the move, then let the loop's redraw paint the settled frame.
         glide_view(ui.panel, &mut view, old, new_off, self.strip());
         self.off = new_off;
-        // How long a list key takes, on development builds: building the view, then the
-        // glide frames. The settled frame the loop draws after is timed there.
-        #[cfg(feature = "dev")]
-        {
-            let t2 = catcard_hal::dwt::cycles();
-            // SAFETY: reads RCC.
-            let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
-            crate::catlog!(
-                "menu key: build {} us, glide {} us ({} rows)",
-                t1.wrapping_sub(t0) / per_us,
-                t2.wrapping_sub(t1) / per_us,
-                items.len()
-            );
-        }
     }
 }
 
@@ -3085,30 +2832,18 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         Screen::Games => draw_menu(panel, screen, v),
         Screen::About => about_screen(panel),
         Screen::AboutChip => chip_screen(panel),
-        Screen::Usb => usb_screen(panel),
-        Screen::Clocks => clock_screen(panel),
-        Screen::Psram => psram_screen(panel),
-        Screen::Sflash => sflash_screen(panel),
-        Screen::PsramProbe => psram_probe(panel),
         Screen::Boot => boot_screen(panel, v.report),
         Screen::Selftest => crate::selftest::screen(v.report, panel),
-        Screen::Keypad => keypad_screen(panel, v.last_key, v.keys_seen, v.raw_kn, v.raw_held),
         Screen::PrngStatus => prng_screen(panel, v.drbg_stats, v.drbg_sample),
-        Screen::Rtc => rtc_screen(panel, &v.rtc),
-        // Handled in `run`: the scroll test owns the panel until it hands back.
-        Screen::ScrollTest => {}
         Screen::SettingsStore
         | Screen::Nickname
         | Screen::Multisig
         | Screen::WifStore
-        | Screen::NickPreview
         | Screen::TypePasswords => {}
         #[cfg(not(feature = "board-mk3"))]
         Screen::SettingsToSd => {}
         #[cfg(feature = "board-q1")]
         Screen::Notes | Screen::ScanQr => {}
-        Screen::Kernel => kernel_screen(panel),
-        Screen::Colours => colours_screen(panel),
         Screen::Sd => sd_screen(panel),
         // Handled in `run`: it pages itself, and owns the keypad while it does.
         Screen::Logs => {}
@@ -3121,12 +2856,7 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: it prompts, generates and writes the card itself.
         #[cfg(not(feature = "board-mk3"))]
         Screen::PaperWallet => {}
-        Screen::ViewTrngWords => {}
         Screen::TrngStartup => {}
-        Screen::GateCheck => {}
-        #[cfg(not(feature = "board-mk3"))]
-        Screen::NfcTest => {}
-        Screen::KbdTest => {}
         // Handled in `run`: each drives the tag, the panel and its own prompts.
         #[cfg(not(feature = "board-mk3"))]
         Screen::NfcTool(_) | Screen::NfcSharing | Screen::PushTx => {}
@@ -3194,14 +2924,6 @@ fn draw(panel: &mut display::Panel, screen: Screen, v: &View<'_>) {
         // Handled in `run`: both drive their own screens from the keypad.
         Screen::XorSplit | Screen::XorJoin | Screen::KeyCodex32 => {}
         Screen::KeyVault => {}
-        #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-        Screen::DumpState => {}
-        #[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-        Screen::RestoreSettings => {}
-        #[cfg(feature = "board-q1")]
-        Screen::QrProbe => {}
-        #[cfg(feature = "board-q1")]
-        Screen::SweepTest => {}
         // Handled in `run`: it asks questions and shows words, so it drives the panel
         // and the keypad itself.
         Screen::NewSeed(_) | Screen::KeyNewSeed => {}
@@ -3420,299 +3142,6 @@ fn reg_line(name: &str, v: u32) -> Line {
     s
 }
 
-/// USB: did the peripheral come up, is the host talking, and what does the core think.
-fn usb_screen(panel: &mut display::Panel) {
-    // The fourth field is an outbox that has not drained -- a reply we owe the host --
-    // not a staged image. It used to be labelled "staged" here, which said the device
-    // was holding firmware when it was holding a reply. The staged image is a separate
-    // question, asked below.
-    let (configured, rx, tx, queued) = usbtask::stats();
-    let fault = usbtask::init_fault();
-
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-
-    let mut l = Line::new();
-    let _ = write!(
-        l,
-        "state {}{}",
-        if configured { "configured" } else { "down" },
-        if fault.is_empty() { "" } else { " " }
-    );
-    let _ = l.push_str(fault);
-    let _ = lines.push(l);
-
-    let mut l = Line::new();
-    let _ = write!(l, "in {rx}  out {tx}{}", if queued { "  txq" } else { "" });
-    let _ = lines.push(l);
-
-    // The supply and its clock gate, which is where the first hardware failure lived.
-    // SAFETY: reads only.
-    unsafe {
-        let cr2 = catcard_hal::clock::pwr_cr2();
-        let mut l = Line::new();
-        let _ = write!(
-            l,
-            "USV {}  PWREN {}",
-            (cr2 >> 10) & 1,
-            (catcard_hal::clock::apb1enr1() >> 28) & 1
-        );
-        let _ = lines.push(l);
-    }
-
-    match usbtask::otg_regs() {
-        Some(r) => {
-            let _ = lines.push(reg_line("GINTSTS", r[0]));
-            let _ = lines.push(reg_line("DCTL   ", r[5]));
-        }
-        None => {
-            let mut l = Line::new();
-            let _ = write!(l, "core not initialised");
-            let _ = lines.push(l);
-        }
-    }
-
-    // Resets seen / self-heal re-inits / OUT-endpoint arms. `rst` climbing with `state
-    // down` means the host keeps resetting and we keep dropping it; `re` climbing means
-    // the self-heal is firing.
-    //
-    // "staged" rides on this line rather than its own: the mono panel fits exactly six
-    // rows and this screen already uses all six, so a seventh would be dropped by the
-    // ignored `push` and the board with the least room would lose it silently.
-    let (resets, reinits, rearms) = usbtask::recovery_counts();
-    let mut l = Line::new();
-    let _ = write!(
-        l,
-        "rst {resets} re {reinits} arm {rearms}{}",
-        if usbtask::has_pending() {
-            "  staged"
-        } else {
-            ""
-        }
-    );
-    let _ = lines.push(l);
-
-    info(panel, "USB", &lines);
-}
-
-/// Clocks: the MSI range every cycle-count delay in this firmware is calibrated against.
-fn clock_screen(panel: &mut display::Panel) {
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    // SAFETY: reads only.
-    unsafe {
-        let cr = catcard_hal::clock::rcc_cr();
-        let khz = catcard_hal::clock::msi_range_khz(cr);
-
-        let mut l = Line::new();
-        let _ = write!(l, "MSI {}.{:03} MHz", khz / 1000, khz % 1000);
-        let _ = lines.push(l);
-
-        let mut l = Line::new();
-        let _ = write!(
-            l,
-            "HSI48 {}  PLL {}",
-            u8::from(catcard_hal::clock::hsi48_ready()),
-            (cr >> 25) & 1
-        );
-        let _ = lines.push(l);
-
-        let _ = lines.push(reg_line("RCC_CR ", cr));
-        let _ = lines.push(reg_line("AHB3EN ", catcard_hal::clock::ahb3enr()));
-    }
-    info(panel, "Clocks", &lines);
-}
-
-/// PSRAM: says the thing our own code knows and the hardware cannot be asked.
-fn psram_screen(panel: &mut display::Panel) {
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    match catcard_board::BOARD.psram {
-        None => {
-            let mut l = Line::new();
-            let _ = write!(l, "none on this board");
-            let _ = lines.push(l);
-        }
-        Some(p) => {
-            let mut l = Line::new();
-            let _ = write!(l, "base {:04x}_0000", p.base >> 16);
-            let _ = lines.push(l);
-
-            let mut l = Line::new();
-            let _ = write!(l, "we never configure OCTOSPI");
-            let _ = lines.push(l);
-
-            // Whether that matters is the open question: the bootloader maps PSRAM to
-            // read a staged image, and may leave it mapped.
-            let mut l = Line::new();
-            let _ = write!(l, "press ok to write+read back");
-            let _ = lines.push(l);
-
-            let mut l = Line::new();
-            let _ = write!(l, "(hangs if not mapped)");
-            let _ = lines.push(l);
-
-            // SAFETY: reads only.
-            let _ = lines.push(reg_line("AHB3EN ", unsafe {
-                catcard_hal::clock::ahb3enr()
-            }));
-        }
-    }
-    info(panel, "PSRAM", &lines);
-}
-
-/// Write a word to PSRAM and read it back.
-///
-/// **The question this answers is whether an upgrade can work at all.** The bootloader
-/// installs from PSRAM, so it configures OCTOSPI to read one at boot; if it leaves that
-/// mapping in place for the firmware, staging works with no driver of ours. If it does
-/// not, every upgrade this device accepts writes into nothing.
-///
-/// A read of an unmapped region faults rather than returning a value, and the fault
-/// needs a power cycle — so **the device hanging on this screen is itself the answer**,
-/// and says the mapping is not inherited.
-///
-/// Writes into the staging area, which holds nothing unless an upgrade is in flight.
-fn psram_probe(panel: &mut display::Panel) {
-    let Some(p) = catcard_board::BOARD.psram else {
-        message(panel, "PSRAM", "none on this board", "");
-        return;
-    };
-    // Every 4 KB across the whole region, each word holding its own offset. One word at one
-    // address only proves the region answers; a staged firmware fills megabytes of it, and
-    // an image that stages "successfully" and then hashes wrong is what a region that stops
-    // holding data part way through looks like from the outside.
-    const STEP: u32 = 4 * 1024;
-    let stamp = |off: u32| off ^ 0xCA7C_A2D0;
-
-    message(panel, "Probing PSRAM", "hangs if unmapped", "");
-    // SAFETY: the region `BoardSpec` describes as memory-mapped PSRAM, aligned, nothing
-    // else using it while the menu is up. An unmapped region faults, which is the result
-    // being measured -- hence the screen above.
-    let (first_bad, alias) = unsafe {
-        let base = p.base as *mut u32;
-        let mut off = 0u32;
-        while off < p.len {
-            core::ptr::write_volatile(base.byte_add(off as usize), stamp(off));
-            off += STEP;
-        }
-        // Read every one back only after all of them are written: a write that lands
-        // somewhere else shows up here and not in an immediate read-back.
-        let mut first_bad = None;
-        let mut off = 0u32;
-        while off < p.len {
-            if core::ptr::read_volatile(base.byte_add(off as usize)) != stamp(off) {
-                first_bad = Some(off);
-                break;
-            }
-            off += STEP;
-        }
-        // Aliasing: if the window is smaller than the region claims, an address high up
-        // is the same cell as one low down, and writing one changes the other.
-        core::ptr::write_volatile(base, 0x1111_1111);
-        let mut alias = None;
-        let mut probe = 64 * 1024;
-        while probe < p.len {
-            core::ptr::write_volatile(base.byte_add(probe as usize), 0x2222_2222);
-            if core::ptr::read_volatile(base) != 0x1111_1111 {
-                alias = Some(probe);
-                break;
-            }
-            probe *= 2;
-        }
-        (first_bad, alias)
-    };
-
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    let mut l = Line::new();
-    let _ = write!(l, "region {} KB", p.len / 1024);
-    let _ = lines.push(l);
-    let mut l = Line::new();
-    match first_bad {
-        None => {
-            let _ = write!(l, "all {} KB hold data", p.len / 1024);
-        }
-        Some(off) => {
-            let _ = write!(l, "first bad at {:#x}", off);
-        }
-    }
-    let _ = lines.push(l);
-    let mut l = Line::new();
-    match alias {
-        None => {
-            let _ = write!(l, "no aliasing");
-        }
-        Some(off) => {
-            let _ = write!(l, "aliases base at {:#x}", off);
-        }
-    }
-    let _ = lines.push(l);
-    crate::catlog!(
-        "psram: len {} first_bad {:?} alias {:?}",
-        p.len,
-        first_bad,
-        alias
-    );
-    info(panel, "PSRAM probe", &lines);
-}
-
-/// SPI-NOR probe: bring up the flash and show its JEDEC id and size.
-///
-/// This is the first thing to check on an mk3 -- a plausible id (Macronix `C2 20 14`, a
-/// 1 MB MX25L8006E) proves the SPI2 pins, the PB9 chip-select and the clock are all right.
-/// Boards with no SPI-NOR (mk4/mk5/Q1) say so.
-fn sflash_screen(panel: &mut display::Panel) {
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    if catcard_board::BOARD.sflash.is_none() {
-        let mut l = Line::new();
-        let _ = write!(l, "none on this board");
-        let _ = lines.push(l);
-        info(panel, "SPI-NOR", &lines);
-        return;
-    }
-
-    // The part has other holders now -- firmware staging and the settings store -- so
-    // the probe takes its turn like them, and says who has it when it cannot.
-    #[cfg(feature = "board-mk3")]
-    let _ticket = match crate::nor::claim(crate::nor::PROBE) {
-        Some(t) => t,
-        None => {
-            let mut l = Line::new();
-            let _ = write!(l, "busy: {}", crate::nor::holder().unwrap_or("?"));
-            let _ = lines.push(l);
-            info(panel, "SPI-NOR", &lines);
-            return;
-        }
-    };
-    // SAFETY: SPI2 and its pins belong to the sflash alone, the ticket above (on the one
-    // board that has the part) is what says nothing else holds them, and the menu waits
-    // for this to return before it can be chosen again.
-    match unsafe { crate::nor::init() } {
-        Some(mut nor) => match nor.jedec_id() {
-            Ok(id) => {
-                let mut l = Line::new();
-                let _ = write!(
-                    l,
-                    "id {:02x} {:02x} {:02x}",
-                    id.manufacturer, id.memory_type, id.capacity
-                );
-                let _ = lines.push(l);
-                let mut l = Line::new();
-                let _ = write!(l, "size {} KB", nor.size() / 1024);
-                let _ = lines.push(l);
-            }
-            Err(_) => {
-                let mut l = Line::new();
-                let _ = write!(l, "no response");
-                let _ = lines.push(l);
-            }
-        },
-        None => {
-            let mut l = Line::new();
-            let _ = write!(l, "probe failed");
-            let _ = lines.push(l);
-        }
-    }
-    info(panel, "SPI-NOR", &lines);
-}
-
 /// What bring-up found, in the same words the selftest screen used.
 fn boot_screen(panel: &mut display::Panel, report: &BootReport) {
     let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
@@ -3746,254 +3175,6 @@ fn boot_screen(panel: &mut display::Panel, report: &BootReport) {
     };
     let _ = lines.push(l);
     info(panel, "Boot", &lines);
-}
-
-/// Which key the firmware decoded, which is the question a mirrored pad raises.
-fn keypad_screen(
-    panel: &mut display::Panel,
-    last: Option<Key>,
-    seen: u32,
-    raw_kn: Option<usize>,
-    held: u64,
-) {
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-
-    let mut l = Line::new();
-    match last {
-        Some(Key::Digit(d)) => {
-            let _ = write!(l, "last  {d}");
-        }
-        Some(Key::Confirm) => {
-            let _ = write!(l, "last  y");
-        }
-        Some(Key::Cancel) => {
-            let _ = write!(l, "last  x");
-        }
-        None => {
-            let _ = write!(l, "press any key");
-        }
-        Some(Key::Qr) => {
-            let _ = write!(l, "last  QR");
-        }
-        Some(Key::Char(c)) => {
-            let _ = write!(l, "last  {}", c as char);
-        }
-    }
-    let _ = lines.push(l);
-
-    // The raw matrix position, which every physical key produces -- including the ones
-    // that decode to nothing (SYM, LAMP, NFC, QR). This is what makes the tester able to
-    // tell a key that is wired but unmapped from a key that is not wired at all.
-    let mut l = Line::new();
-    match raw_kn {
-        Some(kn) => {
-            let _ = write!(l, "kn {kn}  held {}", held.count_ones());
-        }
-        None => {
-            let _ = write!(l, "kn -");
-        }
-    }
-    let _ = lines.push(l);
-
-    let mut l = Line::new();
-    let _ = write!(l, "count {seen}");
-    let _ = lines.push(l);
-
-    // The edge path: whether the hard falling-edge interrupt is armed, how many edges it
-    // has taken, and whether the storm guard shut it off. On a board where it is not armed
-    // at boot this is the screen that arms it -- with a power cycle as the undo.
-    let (edges, armed, storm) = crate::keypad::edge_stats();
-    let mut l = Line::new();
-    let _ = write!(
-        l,
-        "edges {edges} {}",
-        if storm {
-            "STORM, off"
-        } else if armed {
-            "armed"
-        } else {
-            "off"
-        }
-    );
-    let _ = lines.push(l);
-
-    let mut l = Line::new();
-    let _ = l.push_str(if armed {
-        "0 masks edges"
-    } else {
-        "0 arms edges"
-    });
-    let _ = lines.push(l);
-
-    let mut l = Line::new();
-    let _ = write!(l, "x twice  back");
-    let _ = lines.push(l);
-    info(panel, "Keypad", &lines);
-}
-
-/// The UI DRBG's diagnostic counters. This is the generator behind the keypad scan
-/// shuffle and every UI random draw; it is topped up (reseeded) on each physical keypress
-/// with the edge-timed cycle counter and RTC, so `seeded`/`reseeds` climb as keys are
-/// pressed. It is never the wallet-seed generator -- that is `EntropyPool`, which has no
-/// draw API at all. Counters only; no generator state is shown.
-/// A repaint pacer: says yes once per `period` cycles, and immediately the first time.
-///
-/// One of these instead of each self-refreshing screen carrying its own copy of the same
-/// three lines. The first frame is never delayed, so a screen is painted the moment it
-/// opens rather than a frame later.
-#[derive(Copy, Clone, Default)]
-struct Pace {
-    last: u32,
-    started: bool,
-}
-
-impl Pace {
-    fn due(&mut self, period: u32) -> bool {
-        let now = catcard_hal::dwt::cycles();
-        // `wrapping_sub` because DWT_CYCCNT wraps every 2^32 cycles, far longer than a frame.
-        if self.started && now.wrapping_sub(self.last) < period {
-            return false;
-        }
-        self.last = now;
-        self.started = true;
-        true
-    }
-}
-
-/// What the RTC debug screen shows: the three registers, resampled on a clock.
-///
-/// **Nothing here initialises or writes the RTC.** The point of the screen is to show how
-/// the *bootloader* left it, so every value is read exactly as found -- `snapshot` is pure
-/// reads, and the only RCC write anywhere near the RTC is the APB read gate that bring-up
-/// already opened, which lets the CPU see the registers without configuring the peripheral.
-#[derive(Copy, Clone, Default)]
-struct RtcWatch {
-    /// `[SSR, TR, DR]`, in the order the shadow registers require.
-    snap: [u32; 3],
-    pace: Pace,
-}
-
-impl RtcWatch {
-    /// Resample if `period` cycles have passed. Returns whether it did.
-    fn sample(&mut self, period: u32) -> bool {
-        if !self.pace.due(period) {
-            return false;
-        }
-        // SAFETY: three register reads, in the order the shadow registers require (SSR,
-        // TR, DR -- reading DR unlocks the shadow). The APB read gate was opened during
-        // bring-up; nothing here writes.
-        self.snap = unsafe { catcard_hal::rtc::snapshot() };
-        true
-    }
-}
-
-/// The scheduler, live: ticks, switches, recovered time, and each task's stack depth.
-///
-/// Only meaningful with the menu itself running as a kernel task (Debug -> Kernel UI):
-/// starting the kernel any other way replaces the menu, so nothing would be left to draw
-/// this. Without the kernel it says so rather than showing a column of zeros.
-fn kernel_screen(panel: &mut display::Panel) {
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    if !catcard_kernel::running() {
-        let mut l = Line::new();
-        let _ = l.push_str("not running");
-        let _ = lines.push(l);
-        let mut l = Line::new();
-        let _ = l.push_str("start: Kernel UI");
-        let _ = lines.push(l);
-        info(panel, "Kernel", &lines);
-        return;
-    }
-
-    let mut l = Line::new();
-    let _ = write!(
-        l,
-        "t {} sw {}",
-        catcard_kernel::ticks(),
-        catcard_kernel::switches()
-    );
-    let _ = lines.push(l);
-
-    // `chk` is the per-switch guard check (Debug -> Self-tests); off on every boot.
-    let mut l = Line::new();
-    let _ = write!(
-        l,
-        "rec {} fp {} chk {}",
-        catcard_kernel::recovered(),
-        catcard_kernel::fp_saves(),
-        if catcard_kernel::guard_checks() {
-            "on"
-        } else {
-            "off"
-        }
-    );
-    let _ = lines.push(l);
-
-    for i in 0..catcard_kernel::count().min(MAX_LINES - 2) {
-        let id = catcard_kernel::TaskId(i);
-        let mut l = Line::new();
-        let _ = write!(
-            l,
-            "{} {}/{} {}",
-            catcard_kernel::name(id),
-            catcard_kernel::high_water(id),
-            catcard_kernel::stack_len(id),
-            if catcard_kernel::stack_ok(id) {
-                "ok"
-            } else {
-                "OVERFLOW"
-            }
-        );
-        let _ = lines.push(l);
-    }
-
-    info(panel, "Kernel", &lines);
-}
-
-/// Two BCD digits as a number. The RTC stores its time and date this way.
-/// Source: RM0432 §RTC, `RTC_TR`/`RTC_DR` field layout [C]
-fn bcd2(v: u32) -> u32 {
-    ((v >> 4) & 0xf) * 10 + (v & 0xf)
-}
-
-/// The RTC as the bootloader left it: the raw registers, and what they decode to.
-///
-/// Read-only, and deliberately so -- see [`RtcWatch`]. A device that has never had its
-/// clock set still shows something here, because the RTC counts from whenever it started,
-/// not from a wall-clock epoch.
-fn rtc_screen(panel: &mut display::Panel, w: &RtcWatch) {
-    let [ssr, tr, dr] = w.snap;
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-
-    // The sub-second down-counter, reloaded from the synchronous prescaler each second.
-    // The one that moves fastest, so it is the one that shows the RTC is running at all.
-    let mut l = Line::new();
-    let _ = write!(l, "SSR  {ssr:#010x}  {ssr}");
-    let _ = lines.push(l);
-
-    // Source: RM0432 §RTC -- TR is seconds[6:0], minutes[14:8], hours[21:16], all BCD.
-    let mut l = Line::new();
-    let _ = write!(
-        l,
-        "TR   {tr:#010x}  {:02}:{:02}:{:02}",
-        bcd2((tr >> 16) & 0x3f),
-        bcd2((tr >> 8) & 0x7f),
-        bcd2(tr & 0x7f)
-    );
-    let _ = lines.push(l);
-
-    // Source: RM0432 §RTC -- DR is day[5:0], month[12:8], year[23:16], all BCD.
-    let mut l = Line::new();
-    let _ = write!(
-        l,
-        "DR   {dr:#010x}  {:02}-{:02}-{:02}",
-        bcd2((dr >> 16) & 0xff),
-        bcd2((dr >> 8) & 0x1f),
-        bcd2(dr & 0x3f)
-    );
-    let _ = lines.push(l);
-
-    info(panel, "RTC", &lines);
 }
 
 fn prng_screen(panel: &mut display::Panel, s: catcard_entropy::DrbgStats, sample: Option<u32>) {
@@ -4034,32 +3215,6 @@ fn prng_screen(panel: &mut display::Panel, s: catcard_entropy::DrbgStats, sample
     let _ = lines.push(l);
 
     info(panel, "PRNG status", &lines);
-}
-
-/// Colours: a chart of what the panel can show -- bars, the full ramp of each channel,
-/// and a hue sweep. It fills the whole LCD, not the UI's window; any key leaves, and the
-/// menu wipes the panel on the way out.
-#[cfg(feature = "board-q1")]
-fn colours_screen(panel: &mut display::Panel) {
-    if panel.draw_colour_chart().is_err() {
-        crate::catlog!("colours: chart write failed");
-    }
-}
-
-/// Colours, on a panel that has two of them.
-#[cfg(not(feature = "board-q1"))]
-fn colours_screen(panel: &mut display::Panel) {
-    let mut lines: heapless::Vec<Line, MAX_LINES> = heapless::Vec::new();
-    for text in [
-        "mono OLED: black and white",
-        "only -- nothing to chart",
-        "any key  back",
-    ] {
-        let mut l = Line::new();
-        let _ = l.push_str(text);
-        let _ = lines.push(l);
-    }
-    info(panel, "Colours", &lines);
 }
 
 /// Utils → Upgrade Firmware: read a firmware off the card or the Virtual Disk, ask, and
@@ -4230,7 +3385,7 @@ pub(crate) fn install_staged_image(
     let mut staged = match Staged::begin(area, &catcard_board::BOARD, len) {
         Ok(s) => s,
         Err(why) => {
-            crate::catlog!("install: image size refused: {:?}", why);
+            crate::catlog!("install: image size refused: {}", crate::logbuf::Dbg(&why));
             message(
                 ui.panel,
                 HEAD,
@@ -4287,7 +3442,7 @@ pub(crate) fn install_staged_image(
     let approval = match staged.inspect_with(crate::own_header().as_ref(), &mut tick) {
         Ok(a) => a,
         Err(why) => {
-            crate::catlog!("install: image refused: {:?}", why);
+            crate::catlog!("install: image refused: {}", crate::logbuf::Dbg(&why));
             message(
                 ui.panel,
                 "No upgrade",
@@ -4350,7 +3505,7 @@ fn offer_and_install<A>(
                             crate::staging::install(gate, login, ui.panel, region);
                         }
                         Err(why) => {
-                            crate::catlog!("install: commit refused: {:?}", why);
+                            crate::catlog!("install: commit refused: {}", crate::logbuf::Dbg(&why));
                             message(
                                 ui.panel,
                                 "Not installed",
@@ -4381,7 +3536,6 @@ fn offer_and_install<A>(
 /// full card and a filesystem it cannot mount tell themselves apart. Nothing here is
 /// irreversible -- at worst it leaves a short file behind.
 fn save_log_to_card(ui: &mut Ui<'_>) {
-    crate::catlog!("sd: saving log");
     card_wait(ui.panel, "Saving log", "writing to the card");
 
     // Snapshot the log before touching anything else, so what lands on the card is the
@@ -4395,7 +3549,6 @@ fn save_log_to_card(ui: &mut Ui<'_>) {
     }
     match write_card_file("/CATCARD.LOG", &buf[..n]) {
         Ok(()) => {
-            crate::catlog!("sd: wrote {} bytes to /CATCARD.LOG", n);
             message(ui.panel, "Log saved", "/CATCARD.LOG", "any key to go back");
         }
         Err(why) => {
@@ -4602,7 +3755,7 @@ pub(crate) fn mount_card() -> Result<CardVolume, &'static str> {
                 return Err(());
             }
             Err(e) => {
-                crate::catlog!("sd: card would not start: {:?}", e);
+                crate::catlog!("sd: card would not start: {}", crate::logbuf::Dbg(&e));
                 why = "card would not start";
                 return Err(());
             }
@@ -4937,7 +4090,6 @@ fn delete_browse_file<D: catcard_sd::fat::SectorDriver>(
     }
     match vol.remove_file(path).and_then(|()| vol.flush()) {
         Ok(()) => {
-            crate::catlog!("browse: deleted {}", path);
             message(ui.panel, "Deleted", name, "any key to go back");
         }
         Err(()) => {
@@ -5673,139 +4825,6 @@ pub(crate) fn public_at(
     }
     busy.tick(panel);
     Some(crate::keywork::run(|kw| here.to_extended_pub(kw)))
-}
-
-/// Which way of asking the panel to scroll by itself actually moves the bar.
-///
-/// The busy bar crosses a secure-element call only if the panel controller scrolls it
-/// unaided, and that has not been seen working on every board. Three labelled phases, two
-/// seconds each, with the CPU doing nothing that could draw:
-///
-/// 1. the SSD1306 scroll setup this firmware sends today (six parameters);
-/// 2. the longer form some SSD1306-family controllers take, with start and end columns;
-/// 3. the CPU-ticked bar, as a control that must always move.
-///
-/// Whichever moves decides what `scroll_busy_bar` sends. A full redraw between phases puts
-/// the panel back in a known state whatever the previous command did.
-fn scroll_test(ui: &mut Ui<'_>) {
-    #[cfg(not(feature = "board-q1"))]
-    {
-        use catcard_ui::DisplayBus;
-        // SAFETY: reads RCC only.
-        let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
-        let hold = |ms: u32| catcard_hal::dwt::delay_cycles(ms * per_ms);
-
-        let phases: [(&str, &[u8]); 2] = [
-            (
-                "1 of 3: short form",
-                &[0x2E, 0x26, 0x00, 7, 0x07, 7, 0x00, 0xFF, 0x2F],
-            ),
-            (
-                "2 of 3: long form",
-                &[0x2E, 0x26, 0x00, 7, 0x07, 7, 0x00, 0x00, 0x7F, 0x2F],
-            ),
-        ];
-        for (label, bytes) in phases {
-            display::draw(ui.panel, |c| {
-                catcard_ui::widgets::working(c, &display::LAYOUT, "Scroll test", label, 0);
-            });
-            let _ = ui.panel.bus_mut().command(bytes);
-            crate::catlog!("scroll test: {}", label);
-            hold(2000);
-        }
-        let mut busy = Working::new(ui.panel, "Scroll test", "3 of 3: CPU ticks");
-        for _ in 0..40 {
-            hold(50);
-            busy.tick(ui.panel);
-        }
-        message(
-            ui.panel,
-            "Scroll test",
-            "which moved?",
-            "any key to go back",
-        );
-        wait_for_any_key(ui);
-    }
-    #[cfg(feature = "board-q1")]
-    {
-        // The GPU co-processor's bar: the screen is drawn, the bus handed over, and the CPU
-        // then does nothing that could draw for three seconds, as in a callgate call.
-        // SAFETY: reads RCC only.
-        let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
-        message(ui.panel, "Scroll test", "GPU bar, 3 seconds", "");
-        display::scroll_busy_bar(ui.panel);
-        crate::catlog!("scroll test: gpu bar");
-        catcard_hal::dwt::delay_cycles(3000 * per_ms);
-        message(
-            ui.panel,
-            "Scroll test",
-            "did a bar move at the bottom?",
-            "any key for the LCD scroll",
-        );
-        wait_for_any_key(ui);
-        lcd_scroll_test(ui);
-    }
-}
-
-/// The ST7789's own scrolling, on the Q1: which way it moves the picture, whether it wraps
-/// cleanly, and which edge a fixed area holds still.
-///
-/// Two phases over a striped test card: the whole panel scrolled two lines a frame for two
-/// full turns, then the same with the first 40 lines fixed. Each step waits for the tear
-/// pulse. Then the panel is put back and the next frame sent whole.
-#[cfg(feature = "board-q1")]
-fn lcd_scroll_test(ui: &mut Ui<'_>) {
-    use catcard_ui::st7789::{BARS, WIDTH, rgb565};
-
-    message(ui.panel, "LCD scroll", "watch the stripes", "");
-    // A card that shows direction and wrap: stripes 32 lines wide, a red line on memory
-    // line 0 and a white one on line 319, and a wedge pointing towards higher lines.
-    for i in 0..WIDTH / 32 {
-        let _ = ui
-            .panel
-            .fill_rect(i * 32, 150, 32, 90, BARS[i % BARS.len()]);
-    }
-    let _ = ui.panel.fill_rect(0, 100, 3, 140, rgb565(31, 0, 0));
-    let _ = ui
-        .panel
-        .fill_rect(WIDTH - 3, 100, 3, 140, catcard_ui::st7789::WHITE);
-    for step in 0..20 {
-        let _ = ui.panel.fill_rect(
-            10 + step * 2,
-            110 + step,
-            2,
-            40 - 2 * step,
-            rgb565(0, 63, 0),
-        );
-    }
-
-    let mut missed = 0u32;
-    for (label, fixed_first, steps) in [
-        ("whole panel", 0usize, 320usize),
-        ("first 40 fixed", 40, 140),
-    ] {
-        crate::catlog!("lcd scroll: {}", label);
-        display::reset_origin(ui.panel);
-        let _ = ui.panel.set_scroll_area(fixed_first, 0);
-        for n in 0..steps {
-            if !display::wait_tear() {
-                missed += 1;
-            }
-            let _ = ui
-                .panel
-                .set_scroll_start(fixed_first + (n * 2) % (WIDTH - fixed_first));
-        }
-        let _ = ui.panel.set_scroll_start(0);
-    }
-    display::end_scroll(ui.panel);
-    crate::catlog!("lcd scroll: done, {} tear pulses missed", missed);
-    message(
-        ui.panel,
-        "LCD scroll",
-        "which way did it move?",
-        "which side stayed still?",
-    );
-    wait_for_any_key(ui);
 }
 
 /// The screen for a wait the CPU cannot draw through: a callgate call, where interrupts are
@@ -6815,7 +5834,6 @@ fn export_keystone(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
         wait_for_any_key(ui);
         return;
     };
-    crate::catlog!("keystone: {} accounts, {} bytes", keys.len(), len);
     let body = &mem.bytes()[..len];
     crate::qrshow::animate_bcur(ui, HEAD, Kind::MultiAccounts.written_as(), body);
 }
@@ -7375,47 +6393,6 @@ pub(crate) fn announce_key(
     wait_for_any_key(ui);
 }
 
-/// Debug: run the DMA-driven bar around a real callgate, to be watched.
-///
-/// `fetch_secret` is callgate 18/4, which holds the CPU inside the bootloader with
-/// interrupts masked for about as long as a PIN check does -- the exact condition the bar
-/// exists for, and one that leaves SPI1, the LCD and DMA alone (docs/CALLGATE-DMA.md).
-/// What comes back is zeroized at once. Then another second and a half with the CPU free,
-/// so the motion can be seen for longer than the call lasts.
-#[cfg(feature = "board-q1")]
-fn sweep_test(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
-    use zeroize::Zeroize as _;
-    const HEAD: &str = "Sweep test";
-
-    message(ui.panel, HEAD, "a blue bar should move", "along the bottom");
-    let started = display::start_sweep(ui.panel);
-    crate::catlog!("sweep: test started: {}", started);
-    if !started {
-        message(ui.panel, HEAD, "it did not start", "see the log");
-        wait_for_any_key(ui);
-        return;
-    }
-    let pin_gate = crate::pinentry::BootloaderGate::new(gate);
-    // SAFETY: reads RCC only.
-    let per_ms = (unsafe { catcard_hal::clock::hclk_hz() } / 1000).max(1);
-    let t0 = catcard_hal::dwt::cycles();
-    let fetched = login.fetch_secret(&pin_gate);
-    let ms = catcard_hal::dwt::cycles().wrapping_sub(t0) / per_ms;
-    let ok = match fetched {
-        Ok(mut s) => {
-            s.zeroize();
-            true
-        }
-        Err(_) => false,
-    };
-    // SAFETY: reads RCC only.
-    unsafe { catcard_hal::dwt::delay_ms(1500) };
-    crate::catlog!("sweep: callgate 18/4 took {} ms, ok {}", ms, ok);
-    // Drawing stops it and gives SPI1 back.
-    message(ui.panel, HEAD, "did the bar move?", "any key to go back");
-    wait_for_any_key(ui);
-}
-
 /// A one-question list, returning the row chosen.
 ///
 /// For a choice made *inside* an action, where turning it into another `Screen` would
@@ -7813,7 +6790,6 @@ fn write_export(
         Ok(name) => {
             // The kind and the size, not the name: one export's name carries the
             // fingerprint, and the log is readable by any host.
-            crate::catlog!("export: wrote {} bytes ({})", body.len(), head);
             message(ui.panel, "Exported", &name[1..], "any key to go back");
         }
         Err(why) => {
@@ -7938,33 +6914,6 @@ fn unused_name<D: catcard_sd::fat::SectorDriver>(
         }
     }
     Err("too many of those already")
-}
-
-/// Write several pieces to one new file, in order, and return the name used.
-///
-/// For a payload that is not one buffer and could not be: the settings region is half a
-/// megabyte of memory-mapped flash, so it goes to the card as a slice over the flash
-/// itself rather than through a copy this device has nowhere to put.
-///
-/// Not mk3: its settings are raw SPI-NOR slots, not a region that can be sliced, and
-/// the state dump is compiled out there for the same reason. Bench builds only, with
-/// the dump: it is the only caller.
-#[cfg(all(not(feature = "board-mk3"), feature = "usb-debug-mem"))]
-pub(crate) fn write_card_parts(
-    path: &str,
-    parts: &[&[u8]],
-) -> Result<heapless::String<EXPORT_NAME_MAX>, &'static str> {
-    let mut vol = mount_card()?;
-    let name = unused_name(&mut vol, path)?;
-    let mut file = vol
-        .open_or_create_file(&name)
-        .map_err(|_| "could not open file")?;
-    for part in parts {
-        file.write_all(&mut vol, part).map_err(|_| "write failed")?;
-    }
-    file.flush(&mut vol).map_err(|_| "flush failed")?;
-    vol.flush().map_err(|_| "flush failed")?;
-    Ok(name)
 }
 
 /// The seed, kept just long enough to sign an export's detached signature.
@@ -8192,11 +7141,14 @@ pub(crate) fn stored_from_secret(
     crate::key::note_stored_seed(!matches!(kind, SecretKind::Empty));
     match stored {
         Some(stored) => {
-            crate::catlog!("wallet: stored secret is {:?}", kind);
+            crate::catlog!("wallet: stored secret is {}", crate::logbuf::Dbg(&kind));
             Ok(stored)
         }
         None => {
-            crate::catlog!("wallet: secret is {:?}, not a wallet", kind);
+            crate::catlog!(
+                "wallet: secret is {}, not a wallet",
+                crate::logbuf::Dbg(&kind)
+            );
             Err(match kind {
                 SecretKind::Empty => "no wallet stored",
                 _ => "unknown wallet type",
@@ -9550,13 +8502,7 @@ fn write_address_csv(
         false
     });
     match written {
-        Ok(bytes) => {
-            crate::catlog!(
-                "addresses: wrote {} rows, {} bytes to {}",
-                rows,
-                bytes,
-                file
-            );
+        Ok(_) => {
             let mut said = Line::new();
             let _ = write!(said, "{rows} addresses written");
             message(ui.panel, "Exported", said.as_str(), file);
@@ -10162,20 +9108,57 @@ pub(crate) fn scroll_choice(
 ) -> bool {
     let mut events = [Event::Pressed(Key::Cancel); KEYS];
     let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    // On the Q1 the foot of the screen says what the two keys do, and stays put while the
+    // document scrolls above it: a review nobody has told the reader how to answer is one
+    // they answer by guessing. Until the end has been on screen ENTER only pages, and the
+    // label says that too.
+    #[cfg(feature = "board-q1")]
+    let foot = display::FONTS.small.line_height() + 8;
+    #[cfg(feature = "board-q1")]
+    view.set_height(display::SCREEN_H.saturating_sub(foot));
     loop {
+        #[cfg(feature = "board-q1")]
+        display::draw(ui.panel, |c| {
+            use catcard_ui::canvas::Canvas as _;
+            use catcard_ui::icons::draw_key_hint;
+            {
+                let mut band = catcard_ui::canvas::Inset::band(c, 0, foot);
+                catcard_ui::scroll::render(&mut band, view);
+            }
+            let (w, top) = (c.width(), c.height().saturating_sub(foot));
+            c.fill_rect(0, top, w, foot, 0);
+            c.fill_rect(0, top, w, 1, display::STRIP_INK);
+            let small = display::FONTS.small;
+            let y = top + 5;
+            let enter = if view.at_end() { "accept" } else { "more" };
+            let x = draw_key_hint(c, small, display::FONTS.margin, y, display::CONFIRM, enter);
+            draw_key_hint(
+                c,
+                small,
+                x + 3 * small.advance(b' '),
+                y,
+                display::CANCEL,
+                "reject",
+            );
+        });
+        #[cfg(not(feature = "board-q1"))]
         display::draw(ui.panel, |c| catcard_ui::scroll::render(c, view));
         wait_for_release(ui);
         'wait: loop {
             let _ = usbtask::pump();
             crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
             for k in keys.iter() {
+                // Half a screen a press, and never less than a line: a review is read a
+                // screenful at a time, and half keeps the last lines read in view. (It
+                // was one pixel a press, which a four-page typed-data review made plain.)
+                let page = (display::SCREEN_H / 2).max(view.line_step());
                 let (down, step) = match k {
                     Key::Confirm if view.at_end() => return true,
                     // Not read to the end yet: a page forward, never an answer.
-                    Key::Confirm => (true, view.line_step()),
+                    Key::Confirm => (true, page),
                     Key::Cancel => return false,
-                    Key::Digit(8) => (true, 1),
-                    Key::Digit(5) => (false, 1),
+                    Key::Digit(8) => (true, page),
+                    Key::Digit(5) => (false, page),
                     // An unused key. Keep waiting rather than repainting the same frame,
                     // as `show_doc` does with `DocFlow::Ignored`.
                     _ => continue,
@@ -10987,7 +9970,7 @@ fn format_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
             return;
         }
         Err(e) => {
-            crate::catlog!("sd: card would not start: {:?}", e);
+            crate::catlog!("sd: card would not start: {}", crate::logbuf::Dbg(&e));
             message(ui.panel, "Format SD", "card would not start", "press a key");
             wait_any_key(ui);
             return;
@@ -11171,7 +10154,7 @@ fn card_password(ui: &mut Ui<'_>) {
             return;
         }
         Err(e) => {
-            crate::catlog!("sd: card would not start: {:?}", e);
+            crate::catlog!("sd: card would not start: {}", crate::logbuf::Dbg(&e));
             message(ui.panel, HEAD, "card would not start", "press a key");
             wait_any_key(ui);
             return;
@@ -11332,15 +10315,15 @@ fn log_lock_failure(what: &str, e: &catcard_sd::Error) {
     if let catcard_sd::Error::DataError { .. } = e {
         let (phase, sta, detail) = catcard_hal::sdmmc::last_failure::get();
         crate::catlog!(
-            "sd: CMD42 {} failed: {:?}; sd last {} sta {:08x} detail {}",
+            "sd: CMD42 {} failed: {}; sd last {} sta {:08x} detail {}",
             what,
-            e,
+            crate::logbuf::Dbg(&e),
             catcard_hal::sdmmc::last_failure::name(phase),
             sta,
             detail
         );
     } else {
-        crate::catlog!("sd: CMD42 {} failed: {:?}", what, e);
+        crate::catlog!("sd: CMD42 {} failed: {}", what, crate::logbuf::Dbg(&e));
     }
 }
 
@@ -11528,7 +10511,6 @@ fn view_words(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) 
                 wait_for_any_key(ui);
                 return;
             };
-            crate::catlog!("view words: {} words shown", words.words().count());
             show_words(ui, &words);
             // The words are half of a passphrase wallet. Said after, so it is the last
             // thing on screen rather than scrolled past.
@@ -11574,7 +10556,6 @@ pub(crate) fn say_test(ui: &mut Ui<'_>, head: &str, outcome: crate::pinentry::Te
         }
         TestLogin::Failed => ("could not check it", "see the log", false),
     };
-    crate::catlog!("test login: {}", if right { "correct" } else { a });
     message(ui.panel, head, a, b);
     wait_for_any_key(ui);
     right
@@ -13565,7 +12546,7 @@ fn usb_drive_sd(ui: &mut Ui<'_>, slot: catcard_hal::sdmmc::Slot) {
             return;
         }
         Err(e) => {
-            crate::catlog!("sd: card would not start: {:?}", e);
+            crate::catlog!("sd: card would not start: {}", crate::logbuf::Dbg(&e));
             message(ui.panel, "USB Drive", "card would not start", "press a key");
             wait_any_key(ui);
             return;
@@ -13600,7 +12581,6 @@ fn usb_drive_vdisk(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
         return;
     };
     if let Err(why) = crate::vdisk::ensure_formatted() {
-        crate::catlog!("vdisk: {}", why);
         message(ui.panel, "Virtual Disk", why, "press a key");
         wait_any_key(ui);
         return;

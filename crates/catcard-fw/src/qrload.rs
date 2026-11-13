@@ -278,7 +278,6 @@ fn room_to_unmix(collector: &catcard_bcur::Collector, known: &mut Option<crate::
     *known = crate::heap::take(need);
     if let Some(block) = known.as_mut() {
         block.bytes().fill(0);
-        crate::catlog!("bcur: {} bytes to unmix with", need);
     }
 }
 
@@ -370,7 +369,7 @@ fn read_one(
                         // that "it is talking and I am refusing all of it" is visible, which
                         // is what a sender whose animation has run past its own part count
                         // looks like from here.
-                        crate::catlog!("bcur: refused a part: {:?}", why);
+                        crate::catlog!("bcur: refused a part: {}", crate::logbuf::Dbg(&why));
                         // The room to reduce the next one. Sized from what the part itself
                         // said, which is why this happens after a refusal as well as after a
                         // success -- a stream that is nothing but mixtures would otherwise

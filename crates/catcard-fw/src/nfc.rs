@@ -158,7 +158,7 @@ impl Session {
         };
         drop(self);
         if let Err(why) = done {
-            crate::catlog!("nfc: tag not cleared: {:?}", why);
+            crate::catlog!("nfc: tag not cleared: {}", crate::logbuf::Dbg(&why));
             menu::message(ui.panel, head, "could not clear the tag", why.message());
             menu::wait_for_any_key(ui);
         }
@@ -254,7 +254,6 @@ fn present_image(ui: &mut Ui<'_>, head: &str, image: &mut [u8], note: &str) {
     let Some(s) = go_live(ui, head, image, "writing the tag") else {
         return;
     };
-    crate::catlog!("nfc: {} bytes on the tag", image.len());
     menu::message(ui.panel, "Tap your phone", note, "any key when done");
     menu::wait_for_any_key(ui);
     s.end(ui, head);
@@ -939,7 +938,7 @@ fn receive_with(ui: &mut Ui<'_>, head: &str, pick: Pick<'_>) -> Option<Received>
     };
     s.end(ui, head);
     if let Err(why) = read {
-        crate::catlog!("nfc: read failed: {:?}", why);
+        crate::catlog!("nfc: read failed: {}", crate::logbuf::Dbg(&why));
         held.bytes().zeroize();
         drop(held);
         say(ui, head, why.message());
@@ -952,7 +951,7 @@ fn receive_with(ui: &mut Ui<'_>, head: &str, pick: Pick<'_>) -> Option<Received>
         menu::wait_for_any_key(ui);
         return None;
     };
-    crate::catlog!("nfc: {} bytes received, {:?}", len, what);
+    crate::catlog!("nfc: {} bytes received, {}", len, crate::logbuf::Dbg(&what));
     Some(Received {
         held,
         at,
@@ -1008,7 +1007,6 @@ fn wait_for_write(ui: &mut Ui<'_>, head: &str, s: &mut Session, baseline: &[u8; 
             // A phone holding the tag's RF side busy is a read that did not happen, not a
             // tag that has gone -- and a phone is exactly what this is waiting for. Only a
             // run of them says the part has stopped answering.
-            crate::catlog!("nfc: poll: {}", why);
             quiet = 0;
             missed += 1;
             if missed >= MISSES_ALLOWED {
@@ -1532,7 +1530,6 @@ fn load_words(
             drop(master);
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
-            crate::catlog!("nfc: loaded {} words", words);
             crate::settings::open_wallet(gate, login, ui.panel, head, [a, b, c, d]);
             menu::message(ui.panel, "Loaded", &said, "in force until reboot");
             menu::wait_for_any_key(ui);
@@ -1665,23 +1662,4 @@ pub(crate) fn pushtx_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui:
         menu::message(ui.panel, HEAD, "could not save", "unchanged");
     }
     menu::wait_for_any_key(ui);
-}
-
-/// Debug: write a fixed URL to the tag, so the driver can be tried without a transaction.
-pub(crate) fn probe_screen(ui: &mut Ui<'_>) {
-    const HEAD: &str = "NFC test";
-    if refused_off(ui, HEAD) || refused_absent(ui, HEAD) {
-        return;
-    }
-    let mut image = [0u8; 96];
-    let n = match catcard_nfc::uri_image(
-        &mut image,
-        AREA,
-        "catcard.example/nfc-test",
-        catcard_nfc::prefix::HTTPS,
-    ) {
-        Ok(n) => n,
-        Err(_) => return,
-    };
-    present_image(ui, HEAD, &mut image[..n], "to open the test link");
 }

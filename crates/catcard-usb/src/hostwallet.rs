@@ -120,6 +120,19 @@ pub mod scheme {
     /// length in decimal, and the message. The result's signature is the 65 bytes
     /// `r || s || v`, `v` 27 or 28.
     pub const EIP191: u8 = 4;
+    /// TIP-191, Tron's `personal_sign` (TronWeb's `signMessageV2`): the same digest under
+    /// `"\x19TRON Signed Message:\n"`, and the same 65 bytes back.
+    pub const TIP191: u8 = 5;
+    /// EIP-712 typed data (`eth_signTypedData_v4`). The message is not text but the types
+    /// and values in the layout `catcard_evm::typed` reads; the result's signature is the
+    /// 65 bytes `r || s || v`.
+    pub const EIP712: u8 = 6;
+    /// A Solana off-chain message, version 1: the device wraps the text in the envelope
+    /// for its one signer and signs that. The result's signature is the 64 bytes.
+    pub const SOLANA_OFFCHAIN: u8 = 7;
+    /// A Solana off-chain message, version 0, as the Solana CLI makes one. The message is
+    /// `[32 application domain][u8 format][text]`, format 0 (ASCII) or 1 (UTF-8).
+    pub const SOLANA_OFFCHAIN_V0: u8 = 8;
 }
 
 /// What a chain can be asked for, in a `HostInfo` reply.
@@ -138,6 +151,8 @@ pub mod can {
 pub mod feature {
     pub const ADDRESS_AT: u8 = 1 << 0;
     pub const SIGN_MESSAGE: u8 = 1 << 1;
+    /// `HostSignMessage` takes [`scheme::EIP712`] on the chains that sign EVM messages.
+    pub const TYPED_DATA: u8 = 1 << 2;
 }
 
 /// What the session asking has been given, in a `HostInfo` reply.

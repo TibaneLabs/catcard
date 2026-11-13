@@ -8,8 +8,7 @@
 //! same bytes (step 9), and shows, quizzes, stores and reads back (step 10).
 //!
 //! The same generator also makes a temporary seed ([`new_temp_seed`]) and CCC's key C
-//! ([`new_key_c`]), and Debug -> View TRNG Words ([`view_trng_words`]) runs the same
-//! collection and draw on a throwaway pool and only shows the words.
+//! ([`new_key_c`]).
 //!
 //! Outside this module the pool is drawn from only by Seed XOR's random split
 //! (`seedxor.rs`) and by `spawn_drbg`, which seeds a DRBG (`session.rs`, `paperwallet.rs`);
@@ -23,8 +22,8 @@ use catcard_callgate::Callgate;
 use catcard_ui::keypad::{Event, KEYS, Key};
 
 use crate::menu::{
-    Line, NEW_SEED_ITEMS, announce_key, ask, confirmed, info, message, pick_row, show_doc,
-    show_words, wait_for_any_key, wait_for_release, why_failed, word_texts,
+    Line, NEW_SEED_ITEMS, announce_key, ask, confirmed, info, message, pick_row, show_words,
+    wait_for_any_key, wait_for_release, why_failed,
 };
 use crate::ui::Ui;
 use crate::{display, usbtask};
@@ -665,7 +664,7 @@ fn gather(gate: &Callgate, ui: &mut Ui<'_>, pool: &mut catcard_entropy::EntropyP
             failed[i]
         );
         if let Some(st) = pool.startup(kind.source()) {
-            crate::catlog!("seed: {} startup {:?}", kind.label(), st);
+            crate::catlog!("seed: {} startup {}", kind.label(), crate::logbuf::Dbg(&st));
         }
     }
 
@@ -895,114 +894,4 @@ fn read_choice(ui: &mut Ui<'_>, n: usize) -> Choice {
         }
         display::idle(ui.panel);
     }
-}
-
-/// Draw a seed from the hardware TRNGs and show its words -- a verification tool, not a
-/// wallet. Nothing is stored; it lets the owner see the elements and the chip TRNG
-/// produce fresh, varied words, which is the whole point of this project. Shown through
-/// the same large-font, emissions-scrambled pager the real backup uses.
-pub(crate) fn view_trng_words(gate: &Callgate, ui: &mut Ui<'_>) {
-    use catcard_entropy::EntropyPool;
-    use catcard_wallet::bip39::Mnemonic;
-    use zeroize::Zeroize;
-
-    // A fresh pool, filled only from the hardware sources -- no boot material, no user
-    // entropy -- so the words are exactly what the TRNGs produce right now.
-    let mut pool = EntropyPool::new(crate::entropy_policy());
-    // Held to the start-up test, as New wallet is.
-    pool.enforce_startup();
-
-    // The same collection effort as generating a real seed, from the same sources: a full
-    // byte target from each, and a pause so the counts are legible. A "watch the generator
-    // work" screen that finished in a blink would be reading a handful of bytes and calling
-    // it done -- which is exactly the shortcut this project exists to replace, so it is not
-    // one this screen is allowed to take either.
-    const TARGET: usize = catcard_entropy::STARTUP_SAMPLES;
-    const MAX_PASSES: usize = 320;
-    const STEP_PAUSE_CYCLES: u32 = 4_000_000;
-
-    let mut trngs = crate::trng::Trngs::new(Some(gate));
-    let mut read: heapless::Vec<(crate::trng::Kind, usize), 4> =
-        crate::trng::kinds().iter().map(|&k| (k, 0usize)).collect();
-    for _ in 0..MAX_PASSES {
-        if read.iter().all(|&(_, n)| n >= TARGET) {
-            break;
-        }
-        for entry in read.iter_mut() {
-            if entry.1 >= TARGET {
-                continue;
-            }
-            let _ = usbtask::pump();
-            let mut buf = [0u8; 64];
-            if let Some(n) = trngs.read(entry.0, &mut buf)
-                && n > 0
-            {
-                pool.add(entry.0.source(), &buf[..n]);
-                entry.1 += n;
-            }
-            buf.zeroize();
-        }
-
-        let mut counts = Line::new();
-        for (i, &(kind, n)) in read.iter().enumerate() {
-            let _ = write!(
-                counts,
-                "{}{} {n}",
-                if i > 0 { " " } else { "" },
-                kind.label()
-            );
-        }
-        let mut bits = Line::new();
-        let _ = write!(bits, "{} bits", pool.credited_bits());
-        message(ui.panel, "Reading TRNGs", &counts, &bits);
-        catcard_hal::dwt::delay_cycles(STEP_PAUSE_CYCLES);
-    }
-
-    if pool.check().is_err() {
-        message(
-            ui.panel,
-            "TRNG words",
-            "TRNG check failed",
-            "any key to go back",
-        );
-        wait_for_any_key(ui);
-        return;
-    }
-
-    let mut entropy = [0u8; 32];
-    // Masked: these words are only displayed, never a device key, but it is the same draw
-    // and the same encoding a wallet goes through, and one rule is easier to keep than two.
-    let mnemonic = crate::keywork::run(|kw| {
-        let drawn = pool.draw(&mut entropy);
-        let m = drawn
-            .ok()
-            .and_then(|()| Mnemonic::from_entropy(&entropy, kw).ok());
-        entropy.zeroize();
-        m
-    });
-    let Some(mnemonic) = mnemonic else {
-        message(
-            ui.panel,
-            "TRNG words",
-            "could not draw",
-            "any key to go back",
-        );
-        wait_for_any_key(ui);
-        return;
-    };
-
-    // Verification only -- never stored -- but scramble the emissions all the same, since
-    // these are valid seed words on screen.
-    let texts = word_texts(&mnemonic);
-    let mut lines: heapless::Vec<catcard_ui::scroll::Line, 27> = heapless::Vec::new();
-    let _ = lines.push(catcard_ui::scroll::Line::title("TRNG words"));
-    let _ = lines.push(
-        catcard_ui::scroll::Line::body("not saved")
-            .small()
-            .centered(),
-    );
-    for s in &texts {
-        let _ = lines.push(catcard_ui::scroll::Line::body(s).secret());
-    }
-    show_doc(ui, &lines, true, false);
 }

@@ -81,7 +81,6 @@ fn run(ui: &mut Ui<'_>, n: usize, t: usize) -> [u32; 8] {
         .map(|i| PartyId::new(format!("{i}"), "", alloc::vec![i as u8]))
         .collect();
     let (used0, _, _) = crate::heap::stats();
-    crate::catlog!("tssbench: {}-party keygen, signing threshold {} (+1)", n, t);
 
     let t0 = catcard_hal::dwt::cycles();
     let keys = match dklstss::keygen(n, t, &ids, &mut rng) {
@@ -113,15 +112,6 @@ fn run(ui: &mut Ui<'_>, n: usize, t: usize) -> [u32; 8] {
 
     let keygen_ms = t1.wrapping_sub(t0) / per_ms;
     let sign_ms = t2.wrapping_sub(t1) / per_ms;
-    crate::catlog!(
-        "tssbench: keygen {} ms, sign {} ms ({}), share {} B, heap {} -> peak {}",
-        keygen_ms,
-        sign_ms,
-        if ok { "ok" } else { "FAILED" },
-        share,
-        used0,
-        peak
-    );
     [
         ok as u32,
         keygen_ms,

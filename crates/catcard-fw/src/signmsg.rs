@@ -534,7 +534,9 @@ pub(crate) fn sign_for_computer(
     format: Format,
 ) -> Option<Signed> {
     let choice = Choice { kind, path, format };
-    sign_with_key(gate, login, ui, "Sign message", text, &choice, true)
+    // Not "Sign message": the first thing under this heading is the key being read, before
+    // the person has seen a word of the message, and it must not read as signing.
+    sign_with_key(gate, login, ui, "Message request", text, &choice, true)
 }
 
 /// Sign `text` -- a bare message, or the three-line request form -- and hand back the
@@ -1015,11 +1017,6 @@ fn sign_as_cosigner(
     };
     let mut armoured: heapless::String<SIG_TEXT> = heapless::String::new();
     let _ = armoured.push_str(core::str::from_utf8(&out[..written]).unwrap_or(""));
-    crate::catlog!(
-        "message: cosigner share for {}, {} more needed",
-        address,
-        wallet.m.saturating_sub(1)
-    );
     Some(Signed { armoured, address })
 }
 
@@ -1040,9 +1037,9 @@ pub(crate) fn deliver(
             let Some(out) = beside(path) else {
                 return complain(ui, head, "path too long");
             };
-            write_signed(ui, head, storage, &out, file.as_bytes(), &signed.address);
+            write_signed(ui, head, storage, &out, file.as_bytes());
         }
-        Target::Fresh => fresh(ui, head, file.as_bytes(), &signed.address),
+        Target::Fresh => fresh(ui, head, file.as_bytes()),
     }
 }
 
@@ -1052,13 +1049,12 @@ pub(crate) fn deliver(
 /// request that arrived by camera may want to leave the same way. A PSRAM board without a
 /// scanner offers the card or the disk; the mk3 has only the card, so it asks yes or no.
 #[cfg(feature = "board-q1")]
-fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8], address: &str) {
+fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8]) {
     const WAYS: &[&str] = &["SD card", "Virtual Disk", "BBQr"];
     match menu::choose(ui, head, "where to put it", WAYS) {
-        Some(0) => write_signed(ui, head, menu::Storage::Sd, FILE_NAME, file, address),
-        Some(1) => write_signed(ui, head, menu::Storage::Vdisk, FILE_NAME, file, address),
+        Some(0) => write_signed(ui, head, menu::Storage::Sd, FILE_NAME, file),
+        Some(1) => write_signed(ui, head, menu::Storage::Vdisk, FILE_NAME, file),
         Some(2) => {
-            crate::catlog!("message: signed with {}, shown as BBQr", address);
             crate::qrshow::animate_bbqr(ui, head, file, catcard_bbqr::FileType::UNICODE);
         }
         _ => {}
@@ -1066,37 +1062,29 @@ fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8], address: &str) {
 }
 
 #[cfg(all(not(feature = "board-q1"), not(feature = "board-mk3")))]
-fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8], address: &str) {
+fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8]) {
     let Some(storage) = menu::pick_storage(ui, head) else {
         return;
     };
-    write_signed(ui, head, storage, FILE_NAME, file, address);
+    write_signed(ui, head, storage, FILE_NAME, file);
 }
 
 #[cfg(feature = "board-mk3")]
-fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8], address: &str) {
+fn fresh(ui: &mut Ui<'_>, head: &str, file: &[u8]) {
     menu::ask(ui.panel, head, "write it to the", "SD card?");
     if !menu::confirmed(ui) {
         return;
     }
-    write_signed(ui, head, menu::Storage::Sd, FILE_NAME, file, address);
+    write_signed(ui, head, menu::Storage::Sd, FILE_NAME, file);
 }
 
 /// Write the armoured file and say so.
-fn write_signed(
-    ui: &mut Ui<'_>,
-    head: &str,
-    storage: menu::Storage,
-    path: &str,
-    file: &[u8],
-    address: &str,
-) {
+fn write_signed(ui: &mut Ui<'_>, head: &str, storage: menu::Storage, path: &str, file: &[u8]) {
     let mut note: heapless::String<32> = heapless::String::new();
     let _ = write!(note, "writing to {}", storage.medium());
     menu::card_wait(ui.panel, head, note.as_str());
     match menu::write_storage_file(storage, path, file) {
         Ok(()) => {
-            crate::catlog!("message: {} signed with {}", path, address);
             let name = path.strip_prefix('/').unwrap_or(path);
             menu::message(ui.panel, "Signed", name, "any key to go back");
         }
@@ -1244,7 +1232,6 @@ fn describe322(e: bip322::Error) -> &'static str {
 }
 
 fn complain(ui: &mut Ui<'_>, head: &str, why: &str) {
-    crate::catlog!("message: {}", why);
     menu::message(ui.panel, head, why, "any key to go back");
     menu::wait_for_any_key(ui);
 }

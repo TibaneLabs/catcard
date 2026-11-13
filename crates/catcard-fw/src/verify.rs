@@ -218,7 +218,7 @@ pub(crate) fn owned(
         let _ = lower.push(c.to_ascii_lowercase());
     }
     let shape = Shape::of(lower.as_str(), network);
-    crate::catlog!("verify: shape {:?}", shape);
+    crate::catlog!("verify: shape {}", crate::logbuf::Dbg(&shape));
 
     if let Some(name) = wallet {
         return owned_in_named(gate, login, ui, shape, network, &lower, wanted, name);
@@ -275,7 +275,6 @@ fn owned_in_named(
             return false;
         }
         Named::Many => {
-            crate::catlog!("verify: wallet= names several wallets");
             menu::message(
                 ui.panel,
                 HEAD,
@@ -342,7 +341,6 @@ fn report(ui: &mut Ui<'_>, found: Option<Found>, network: Network) {
                 chain,
                 index
             );
-            crate::catlog!("verify: found at {}", line.as_str());
             menu::message(ui.panel, "Yours", line.as_str(), chain_name(chain));
         }
         Some(Found::Multisig {
@@ -363,12 +361,10 @@ fn report(ui: &mut Ui<'_>, found: Option<Found>, network: Network) {
             );
             let mut at = heapless::String::<24>::new();
             let _ = write!(at, ".../{chain}/{index} {}", chain_name(chain));
-            crate::catlog!("verify: found in {} at {}", line.as_str(), at.as_str());
             menu::message(ui.panel, "Yours", line.as_str(), at.as_str());
         }
         Some(Found::Wif { key, kind }) => {
             let _ = write!(line, "WIF store key {:02}", key + 1);
-            crate::catlog!("verify: found as {} ({})", line.as_str(), kind_name(kind));
             menu::message(ui.panel, "Yours", line.as_str(), kind_name(kind));
         }
         None => {

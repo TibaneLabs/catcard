@@ -260,7 +260,6 @@ fn write_one(
         };
         match card::write_share(ui, storage, &head, &name, &inner, &bytes, protect) {
             Ok(()) => {
-                crate::catlog!("tss: share {} of {} written", m, n);
                 say(ui, &head, "written as", &name);
                 return true;
             }

@@ -112,7 +112,7 @@ each step landed, then what is left.
 | New seed, 12/24 words | ✅ | ✅ | two SEs + MCU TRNG through `EntropyPool` |
 | Mandatory user entropy | ✅ | ➖ | offered after the TRNG words, never required (`menu.rs` new-seed flow; `SECRETS-AND-SETTINGS.md`) |
 | Dice / coin / key-mash input | ✅ | ✅ | 50 rolls, 128 flips, 65 presses (`catcard-entropy::user::min_symbols`); stock's `sha256(ASCII rolls)` convention, mixed into the pool rather than replacing it |
-| View TRNG Words | ✅ | ✅ | Debug → View TRNG Words |
+| View TRNG Words | ✅ | ➖ | removed 2026-11-13 with the other bring-up screens, for flash; New wallet shows the words it is about to use |
 | Dice-only seed | ✅ | ➖ | user entropy adds to the TRNGs, never replaces them (`ENTROPY.md`) |
 | Import words (12/18/24) | ✅ | ✅ | length asked first; the last word offered from the checksum-valid set (`531ea2e`) |
 | Import xprv / raw master / backup / clone / TAPSIGNER / QR | ✅ | ✅ | Import → XPRV, Clone (`backup::clone_import`), TAPSIGNER (`crate::tapsigner`, `catcard-backup::tapsigner`), Seed XOR; a stored raw master or xprv node is worked in as is; backup via Utils → Backup → Restore; SeedQR through the scanner (`crate::seedqr`); untested on hardware |

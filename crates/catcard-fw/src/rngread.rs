@@ -297,13 +297,5 @@ pub fn serve(gate: &Callgate) {
         && (c % 256 == 1
             || fl & (flags::REFUSED | flags::LIMIT) != 0
             || (want.origin == Origin::Bench && fl != 0))
-    {
-        crate::catlog!(
-            "rng sample: {} chunk {} {}B flags {}",
-            want.kind.label(),
-            c,
-            n,
-            fl
-        );
-    }
+    {}
 }

@@ -187,7 +187,6 @@ pub(crate) fn scanned(
     range: core::ops::Range<usize>,
     wire: Wire,
 ) {
-    crate::catlog!("teleport: {} bytes of {}", range.len(), wire.label());
     match wire {
         Wire::Rx => {
             let got: Option<[u8; kt::PUBKEY_LEN]> = lease.bytes()[range.clone()].try_into().ok();
@@ -399,7 +398,6 @@ fn finish_receive(
         wipe(lease, end);
         return say(ui, "nothing came through", "");
     }
-    crate::catlog!("teleport: opened, {} bytes", body_len);
     // Opened: the kept key has done its job. Cleared now, while the wallet whose settings
     // hold it is still the one in force -- see the module documentation.
     if kept_key {

@@ -26,11 +26,8 @@ use catcard_board::pin::Pin;
 use catcard_flash::{NorFlash, SpiDevice};
 use catcard_hal::gpio::{self, Mode, OutputType, Pull, Speed};
 use catcard_hal::spi::{self, Prescaler, Spi};
-#[cfg(feature = "board-mk3")]
 use catcard_settings::norslots::BlockMedium;
-#[cfg(feature = "board-mk3")]
 use catcard_settings::store::MediumError;
-#[cfg(feature = "board-mk3")]
 use catcard_upgrade::claim::{Claim, Ticket};
 
 /// SPI2 SCK/MISO/MOSI are alternate function 5 on the L496. Source: STM32L496 datasheet,
@@ -38,28 +35,22 @@ use catcard_upgrade::claim::{Claim, Ticket};
 const AF_SPI: u8 = 5;
 
 /// Who may hold the part.
-#[cfg(feature = "board-mk3")]
 static HELD: Claim = Claim::new();
 
 /// Firmware staging holds it: an image is being written from offset 0.
-#[cfg(feature = "board-mk3")]
 pub const STAGING: u8 = 1;
 /// The settings store holds it: a slot in the last 128 KB is being read or written.
-#[cfg(feature = "board-mk3")]
 pub const SETTINGS: u8 = 2;
 /// The Debug probe holds it, to read the JEDEC id.
-#[cfg(feature = "board-mk3")]
 pub const PROBE: u8 = 3;
 
 /// Take the part for `holder`, or `None` if someone already has it. Released when the
 /// ticket is dropped. `holder` is [`STAGING`] or [`SETTINGS`].
-#[cfg(feature = "board-mk3")]
 pub fn claim(holder: u8) -> Option<Ticket> {
     HELD.take(holder)
 }
 
 /// Who holds the part, for a refusal that can say so. `None` if nobody does.
-#[cfg(feature = "board-mk3")]
 pub fn holder() -> Option<&'static str> {
     match HELD.holder()? {
         STAGING => Some("firmware staging"),
@@ -103,28 +94,30 @@ pub type Nor = NorFlash<NorBus>;
 /// part that stops answering costs a settings save, not the device. The driver's
 /// error is logged here, where its detail still exists; the store sees one
 /// [`MediumError`] and reports the save as failed.
-#[cfg(feature = "board-mk3")]
 pub struct NorMedium(pub Nor);
 
-#[cfg(feature = "board-mk3")]
 impl BlockMedium for NorMedium {
     fn read(&mut self, addr: u32, out: &mut [u8]) -> Result<(), MediumError> {
         self.0.read(addr, out).map_err(|e| {
-            crate::catlog!("nor: read {:#x} failed: {:?}", addr, e);
+            crate::catlog!("nor: read {:#x} failed: {}", addr, crate::logbuf::Dbg(&e));
             MediumError
         })
     }
 
     fn erase_sector(&mut self, addr: u32) -> Result<(), MediumError> {
         self.0.erase_sector(addr).map_err(|e| {
-            crate::catlog!("nor: erase {:#x} failed: {:?}", addr, e);
+            crate::catlog!("nor: erase {:#x} failed: {}", addr, crate::logbuf::Dbg(&e));
             MediumError
         })
     }
 
     fn program(&mut self, addr: u32, data: &[u8]) -> Result<(), MediumError> {
         self.0.write(addr, data).map_err(|e| {
-            crate::catlog!("nor: program {:#x} failed: {:?}", addr, e);
+            crate::catlog!(
+                "nor: program {:#x} failed: {}",
+                addr,
+                crate::logbuf::Dbg(&e)
+            );
             MediumError
         })
     }

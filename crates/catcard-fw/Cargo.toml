@@ -15,19 +15,24 @@ authors.workspace = true
 # release must strip them -- build through the `fw-*-ship` aliases, or `make ... SHIP=1`,
 # which pass `--no-default-features` and leave only the board.
 #
-# `usb-key-injection` lets a host press keys, which removes the physical-presence
+# `usb-recovery` is the USB reflash for a bench unit that cannot be driven from its own
+# front panel: hold CANCEL at power-on (`failsafe.rs`), or boot with a dead panel or
+# keypad (`recovery.rs`), and a host sends the PIN and a yes over USB. Nothing in the
+# ordinary session takes a key or a PIN from a host any more (2026-11-13: the general
+# key injector is gone); in that loop a host still stands in for the person, which
+# removes the physical-presence
 # confirmation the rest of the design rests on -- a host can approve its own firmware
 # upgrade. `usb-debug-mem` exposes peek / poke / jsr over USB: read any address, write any
 # address, call any address -- the most dangerous thing in this firmware. On a provisioned
 # device it would read the seed and PIN out of RAM and run arbitrary code, so it must
 # never ship. Each is its own feature so a release drops them cleanly. See docs/USB.md.
-default = ["usb-key-injection", "usb-debug-mem", "usb-trng-capture", "games", "dev", "tss"]
+default = ["usb-recovery", "usb-debug-mem", "usb-trng-capture", "games", "dev", "tss"]
 # A development build, which the bench units run. It leaves out everything that can erase
 # or brick a device on its own -- the kill key and microSD 2FA today -- so a bench unit
 # (RDP=2, no recovery) can never be lost to one. A release (`SHIP=1`, no default features)
 # has them. `make lint` still type-checks that code: it runs clippy on the release shapes.
 dev = []
-usb-key-injection = []
+usb-recovery = []
 usb-debug-mem = []
 # `DebugTrng`: raw, unmixed bytes from each hardware random source over plaintext USB,
 # for NIST SP 800-90B assessment off the device (`tools/trng_capture.py`,
@@ -41,8 +46,8 @@ usb-trng-capture = []
 # spare RAM, linked in on the mk3. The crate is only called on the mk3; elsewhere the
 # linker drops it.
 games = ["dep:app-games"]
-# Threshold signing (docs/TSS.md): tsslib's DKLs23. In bench builds for now, while it is
-# being built and measured; compiled in on mk4/mk5/Q1 only (the mk3 has no flash for it).
+# Threshold signing (docs/TSS.md): tsslib's DKLs23. In bench builds and in every published
+# image for mk4/mk5/Q1 (the CI and release workflows add it); the mk3 has no flash for it.
 tss = ["dep:tsslib", "dep:catcard-tss"]
 # Every chain rather than Bitcoin alone: Bitcoin-Cash, Litecoin, Dogecoin, ElectraProto,
 # Ethereum and other EVM chains, Monacoin, Solana, Tron. Off by default, because the
@@ -67,7 +72,7 @@ multichain = [
 # The rescue image: boots straight into the headless USB reflash and nothing else, so it
 # stays small enough to stage where a full image cannot (docs/RESCUE.md). Needs the bench
 # features its loop is built on, and the monitor, so a staging fault can be repaired by hand.
-rescue = ["dev", "usb-key-injection", "usb-debug-mem"]
+rescue = ["dev", "usb-recovery", "usb-debug-mem"]
 board-mk3 = ["catcard-board/board-mk3", "catcard-hal/board-mk3"]
 board-mk4 = ["catcard-board/board-mk4", "catcard-hal/board-mk4"]
 board-mk5 = ["catcard-board/board-mk5", "catcard-hal/board-mk5"]

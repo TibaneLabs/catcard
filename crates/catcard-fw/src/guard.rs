@@ -259,7 +259,10 @@ fn add_card(ui: &mut Ui<'_>, enrolled: &[[u8; 32]]) {
     let digest = prelogin::card_digest(&token);
     token.zeroize();
     if !kept {
-        crate::catlog!("2fa: card did not keep its token: {:?}", written.err());
+        crate::catlog!(
+            "2fa: card did not keep its token: {}",
+            crate::logbuf::Dbg(&written.err())
+        );
         menu::message(ui.panel, HEAD, "the card did not", "keep it; not enrolled");
         menu::wait_for_any_key(ui);
         return;

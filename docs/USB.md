@@ -623,13 +623,6 @@ It is loud rather than hidden, which is the actual safety property here:
 
 None of that belongs in a shipping build, and `fw-<board>-ship` compiles all of it out.
 
-Two Debug screens ride on the same feature, because they are the two ends of one
-bench workflow: **Dump state** (`statedump.rs`) writes the settings region and the seed
-**in the clear** to `XXXXXXXX-STATE.BIN` on the card, and **Restore settings**
-(`restore.rs`) writes a dump's settings section, staged by `--stage-settings`, back over
-the region. A shipping image has neither; a card that holds the wallet with no PIN on it
-is a diagnostic for a device under test, not something a menu should offer an owner.
-
 Peek reads span several frames — a request returns up to 512 bytes — so a range comes
 back in one round trip rather than one byte at a time. Poke is paged one frame per
 request by the client, because the device reassembles a multi-frame message only for a
@@ -935,37 +928,31 @@ holding the device therefore cannot replace its firmware without also being able
 it. A blank device with no PIN set reaches the unlocked state too, which is what keeps
 such a unit recoverable.
 
-### Key injection: a bring-up crutch with an expiry date
+### Key injection: the recovery loop only
 
-`InjectKey` (`0x0020`) hands the firmware one keypress from the host. It is behind the
-cargo feature `usb-key-injection`, on by default **at this stage only**, and it
-contradicts the first constraint below on purpose. Be clear about what it is: with it
-compiled in, a host can approve its own firmware upgrade. The screen is no longer the
-boundary.
+`InjectKey` (`0x0020`) and `UnlockPin` (`0x0021`) hand the firmware one keypress, or the
+whole PIN, from the host. Until 2026-11-13 every bench build took them in every screen;
+that general injector is gone. They are now answered in exactly one place, the USB
+recovery loop of a bench build (cargo feature `usb-recovery`, a default feature), which
+is reached two ways:
 
-It exists because of the order in which unknowns get resolved. The first run on real
-hardware is the run where the keypad map, the display init, and the panel wiring are all
-still `[I]` or `[?]` — and it is also a run on a **locked production unit**, where being
-unable to type the PIN means being unable to do anything at all, including install a
-firmware that would fix the typing. A mirrored key map is a plausible mistake that costs
-the device. `--drive` in `tools/usbclient.py` is the whole device driven over USB
-with nothing touching the keypad, which is what turns that class of mistake back into an
-inconvenience.
+- **hold CANCEL at power-on** (`failsafe.rs`): the device goes straight to the loop,
+  before entropy, the secure elements or the display are touched;
+- **a device that cannot run its front panel** (`recovery.rs`): a dead display or keypad
+  lands there in place of parking.
 
-What it does not do: it does not bypass the PIN. An injected `4` is a `4` at the prompt
-and nothing more — the bootloader still checks the PIN, still rate-limits, still bricks
-on the thirteenth wrong answer. It buys a way to *reach* the prompt, not past it.
+In that loop the host sends the PIN, offers an image (or presses `1`/`2` to stage
+`catcard.dfu` from a card slot), and presses `y` to install or `x` to decline. Everywhere
+else both opcodes answer `UnknownOpcode`, and `Identify` advertises
+`caps::KEY_INJECTION` and `caps::UNLOCK_PIN` only while the loop runs.
 
-The capability is advertised in `Identify` (`caps::KEY_INJECTION`) and shown on the
-selftest screen as `[USB KEYS]`, because a device that can be driven by its host should
-say so where its owner can read it.
+What it does not do: bypass the PIN. The bootloader still checks it, still rate-limits,
+still bricks on the thirteenth wrong answer.
 
-**It must not ship enabled.** Every dev build carries it by default (`fw-mk3` / `fw-mk4`
-/ `fw-q1`); a release is built with the `fw-*-ship` aliases, which strip it, so leaving it
-out is an explicit release step rather than something to remember. The feature is the whole
-removal: without it the opcode, the queue, and the merge in every key loop compile out,
-and `Identify` stops advertising the capability. Once the key map is confirmed on
-hardware, stop building the bring-up image.
+**It must not ship.** Inside that loop the screen is not the boundary: a host that knows
+the PIN can install firmware with nobody pressing anything. The published images are
+built without default features, which compiles the loop, both opcodes and the CANCEL
+check out; a device that cannot run its front panel then parks.
 
 ### Keyboard emulation: a second interface, off by default
 
@@ -1019,9 +1006,8 @@ and asks before a keystroke goes out: the main menu's `Type Passwords` (a BIP-85
 password child, never shown; on the Q1 also a Secure Notes password), Notes → `Send
 Password`, and Confirm on a BIP-85 password child's screen under Derive → `BIP-85`.
 
-**Proving it on hardware:** Debug → `Keyboard EMU test` types the constant line
-`catcard keyboard ok` into whatever window the host has focused, after asking. Open a
-text editor first.
+**Proving it on hardware:** `Type Passwords` with a BIP-85 child, into a text editor.
+(The Debug → `Keyboard EMU test` row that typed a constant line was removed 2026-11-13.)
 
 ### The FIDO2 security key: another interface, off by default
 
@@ -1397,17 +1383,23 @@ never carries one. The Solana transaction has the signatures already in their sl
 | 2 | BIP-322 simple | Bitcoin | P2WPKH, P2TR | base64 of the witness stack |
 | 3 | BIP-322 full | Bitcoin | P2SH-P2WPKH, P2WPKH, P2TR | base64 of the `to_sign` transaction |
 | 4 | EIP-191 `personal_sign` | Ethereum | EVM | 65 raw bytes `r \|\| s \|\| v`, `v` 27 or 28 |
+| 5 | TIP-191, TronWeb's `signMessageV2` | Tron | Tron | the same 65 bytes |
+| 6 | EIP-712 typed data, `eth_signTypedData_v4` | Ethereum | EVM | the same 65 bytes |
+| 7 | Solana off-chain message, version 1 | Solana | Solana | the 64 bytes |
+| 8 | Solana off-chain message, version 0 | Solana | Solana | the 64 bytes |
 
 Checked in the USB task, before anything reaches a screen, and `Refused` + reason on any
-failure: the chain signs messages in this build ("Solana messages cannot be signed here"
--- Bitcoin everywhere; Ethereum on a multichain build that is not the mk3; nothing else);
+failure: the chain signs messages in this build ("Litecoin messages cannot be signed here"
+-- Bitcoin everywhere; Ethereum, Tron and Solana on a multichain build that is not the
+mk3; nothing else);
 the scheme and the format fit the chain and each other; **the key is one this session was
 shown**, under a shared account or by its own path; and the message is text the screen
 shows faithfully. For Bitcoin that is what Sign → Message takes: one line of printable
-ASCII, at most 240 characters. For EIP-191 it is printable ASCII in at most 24 lines, no
-line beginning or ending in a space and no blank first or last line
-(`catcard_evm::personal::text`) -- enough for a sign-in statement, and nothing a screen
-would swallow. Typed data (EIP-712) is not this and is not signed.
+ASCII, at most 240 characters. For EIP-191, TIP-191 and the Solana schemes it is printable
+ASCII in at most 24 lines, no line beginning or ending in a space and no blank first or
+last line (`catcard_evm::personal::text`) -- enough for a sign-in statement, and nothing a
+screen would swallow. A Solana key's path is hardened throughout. For typed data the
+types are checked here and the values on the screen's side (below).
 
 On the device: "Computer asks you to sign a <chain> message", then the scheme's review --
 the message, "will be signed by", the address, the path, and how. For Bitcoin it is
@@ -1415,7 +1407,79 @@ the message, "will be signed by", the address, the path, and how. For Bitcoin it
 and compared, a BIP-322 one is run through the verifier). For EIP-191 the message is laid out a line
 to a line, a message the panel cannot hold whole is refused ("too long to show here")
 rather than shown cut, and the signature is recovered and compared with the signing key
-before it is handed back.
+before it is handed back. TIP-191 is the same review for a Tron address, and the same
+digest under `"\x19TRON Signed Message:\n"` -- not TronWeb's older `signMessage`, which
+signs a hash the person never sees.
+
+**Solana (schemes 7 and 8).** A Solana signature is over bytes and a transaction is
+bytes, so the text is never signed bare: the device wraps it in the off-chain message
+envelope, with the key that signs as the envelope's one signer, and signs that. The
+envelope begins `0xff`, which no transaction can. Scheme 7's message is the text and the
+envelope is version 1, the current one:
+
+```text
+[16 "\xffsolana offchain"][u8 1][u8 signers = 1][32 signer][text]
+```
+
+Scheme 8 is version 0, what the Solana CLI makes; its message is `[32 application
+domain][u8 format][text]`, format 0 (one line of `0x20..=0x7e`) or 1 (UTF-8, held here to
+the same text rule as the rest), and the envelope is
+
+```text
+[16 "\xffsolana offchain"][u8 0][32 application domain][u8 format]
+[u8 signers = 1][32 signer][u16 length][text]
+```
+
+with the application domain on the screen in base58 beside the address. A verifier
+written for one version does not accept the other, so the host says which; it rebuilds
+the envelope from the result's address to verify. Source: Anza "Off-chain message
+signing". The signature is verified against the key before it is handed back.
+
+**Typed data (scheme 6).** The message is not the JSON a site hands
+`eth_signTypedData_v4` but the same types and values in a layout the device reads without
+a JSON parser (`catcard_evm::typed`; `tools/hostwallet.py`'s `typed_blob` makes it from
+the JSON):
+
+```text
+[u8 version = 1]
+[u8 types] × ( [short name] [u8 fields] × ( [short type] [short name] ) )
+[u8 primary]                    index of the message's type
+[domain's value][message's value]
+```
+
+A `short` is a length byte and that many bytes; type strings are EIP-712's own
+(`uint256`, `Person[]`, `bytes32[2]`). One of the types is `EIP712Domain`. Values, by
+type, fields in the order the type lists them:
+
+| type | bytes |
+|---|---|
+| `uintN` | `[u8 n]`, then `n` bytes big-endian, `n` at most `N/8` |
+| `intN` | `N/8` bytes, two's complement, big-endian |
+| `bool` | one byte, 0 or 1 |
+| `address` | twenty bytes |
+| `bytesN` | `N` bytes |
+| `string`, `bytes` | `[u16 length]` little-endian, then the bytes |
+| `T[]` | `[u16 count]` little-endian, then each element |
+| `T[n]` | the `n` elements |
+| a struct | its fields in order |
+
+At most 12 types, 24 fields a type, values nested 6 deep, and the whole in the 960 bytes
+a message may be -- a permit or a small order, not a marketplace listing. Refused: a
+`string` that is not printable ASCII, a type string EIP-712 does not define, a domain
+with a field the standard does not give it or out of the standard's order, a primary
+type that is the domain, and bytes left over.
+
+On the device every value is shown before anything is signed -- "message type", then the
+domain's fields (`domain name`, `domain chainId` with the chain's name when this build
+knows it, ...), then the message's, each under the name its path gives it (`details.token`,
+`to[1].wallet`) -- a page at a time, a value never split across two, and the last page
+says who signs. Numbers are decimal, addresses EIP-55, a `uint256` of all ones is
+"unlimited (the largest number)", and a `bytes` longer than 32 bytes is shown as its
+length and its Keccak-256, which is what EIP-712 signs for it. The digest comes out of
+the same pass that wrote the pages, so what is signed is what was shown; typed data with
+a value longer than a page, or more rows than the review holds, is refused. **What the
+values mean is not known to the device**: a permit reads as a spender, a number and a
+deadline.
 
 The result:
 
@@ -1426,14 +1490,18 @@ The result:
 [u16 len][signature]
 ```
 
-**An EIP-191 signature cannot be a transaction's.** What is hashed begins with `0x19`,
-which is neither an RLP list nor a typed envelope; `personal`'s tests pin it. The device
-never signs a digest a host supplies.
+**None of these signatures can be a transaction's.** What EIP-191, TIP-191 and EIP-712
+hash begins with `0x19`, which is neither an RLP list nor a typed envelope (and a Tron
+transaction is signed over SHA-256, not Keccak); a Solana envelope begins `0xff`. The
+crates' tests pin each. The device never signs a digest a host supplies.
 
 `tools/usbclient.py hid --sign-message "text" --key m/84h/0h/0h/0/3 [--chain btc]
-[--format p2wpkh] [--scheme bip137|bip322|bip322-full|eip191]` asks for the key's address
-first (the key has to have been shared), then for the signature. `@file` reads the
-message from a file.
+[--format p2wpkh] [--scheme bip137|bip322|bip322-full|eip191|tip191|solana-offchain|
+solana-offchain-v0]` asks for the key's address first (the key has to have been shared),
+then for the signature. `@file` reads the message from a file; the scheme defaults to the
+chain's (`--chain trx` is TIP-191, `--chain sol` version 1), and `--app-domain HEX`
+names the application for version 0. `--sign-typed data.json --key m/44h/60h/0h/0/0`
+signs the typed data in a JSON file as `eth_signTypedData_v4` is handed it.
 
 #### What this build answers: `HostInfo`
 
@@ -1444,7 +1512,7 @@ No payload, no question, and answered whatever else is in hand, locked or not:
 count × [u8 chain][u8 can][u8 n][n × u8 format]
 ```
 
-`features`: bit 0 `HostAddressAt`, bit 1 `HostSignMessage`. `session`: bit 0 the person
+`features`: bit 0 `HostAddressAt`, bit 1 `HostSignMessage`, bit 2 typed data (scheme 6). `session`: bit 0 the person
 ticked "Allow during session"; bit 1 something has been shared, so a sign request has
 keys it may name. Then every chain in the build, with what it can be asked for -- `can`
 bit 0 addresses, bit 1 transaction signatures, bit 2 message signatures -- and its

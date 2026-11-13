@@ -206,7 +206,6 @@ pub(crate) fn create(ui: &mut Ui<'_>, pool: Option<&mut EntropyPool>) {
 
     match result {
         Ok(name) => {
-            crate::catlog!("paper: wrote {} bytes", body_len);
             let mut file: heapless::String<48> = heapless::String::new();
             let _ = write!(file, "{}", &name[1..]);
             let mut note: heapless::String<48> = heapless::String::new();

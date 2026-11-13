@@ -237,7 +237,6 @@ pub(crate) fn warm_fingerprint(
             let fp = crate::keywork::run(|kw| master.fingerprint(kw));
             drop(master);
             note_fingerprint(Some(fp));
-            crate::catlog!("wallet: fingerprint derived for the status bar");
         }
         Err(why) => crate::catlog!("wallet: no fingerprint for the status bar: {}", why),
     }

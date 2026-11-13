@@ -126,15 +126,6 @@ pub fn on_key_edge() {
     unsafe { exti::clear_and_mask(mask) };
 }
 
-/// Edges seen since boot, whether the path is still armed, and whether the guard tripped.
-pub fn edge_stats() -> (u32, bool, bool) {
-    (
-        EDGE_COUNT.load(Ordering::Relaxed),
-        !EDGE_OFF.load(Ordering::Relaxed),
-        EDGE_STORM.load(Ordering::Relaxed),
-    )
-}
-
 /// Take the most recent latched edge sample, if a press was caught since the last call.
 ///
 /// Sixteen bytes: the cycle counter and the three RTC registers, little-endian. `None`
@@ -272,23 +263,6 @@ impl GpioMatrix {
         } else {
             crate::catlog!("keypad: edge entropy not armed at boot on this board");
         }
-    }
-
-    /// Arm the edge path now, from the foreground. Returns false if the storm guard has
-    /// shut it off, which is permanent until the next boot.
-    pub fn arm_edge_now(&mut self) -> bool {
-        if EDGE_STORM.load(Ordering::Relaxed) {
-            return false;
-        }
-        EDGE_OFF.store(false, Ordering::Release);
-        self.arm_edge_detect();
-        true
-    }
-
-    /// Mask the edge path and leave it masked.
-    pub fn disarm_edge_now(&mut self) {
-        EDGE_OFF.store(true, Ordering::Release);
-        self.disarm_edge_detect();
     }
 
     /// Idle the matrix for edge detection: drive every row low so any key pulls its column

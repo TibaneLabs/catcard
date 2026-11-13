@@ -373,7 +373,6 @@ pub(crate) fn decide(
         if !involved {
             return Decision::Alone;
         }
-        crate::catlog!("ccc: spend involves key C; checking its policy");
         let warnings = summary.odd_count > 0 || summary.fee_warn;
         let verdict = c.precheck(warnings).and_then(|()| {
             let mut checker = Checker::new(&c.policy);
@@ -391,7 +390,6 @@ pub(crate) fn decide(
 
     match verdict {
         Ok(cosign) => {
-            crate::catlog!("ccc: policy met, height {:?}", cosign.record_height);
             if let Some(h) = cosign.record_height
                 && !update(gate, login, ui, |c| {
                     if h > c.policy.last_height {

@@ -243,13 +243,6 @@ pub(super) fn keep(
     let bytes = crate::keywork::run(|kw| record.to_bytes(kw)).map_err(|e| describe(&e))?;
     let summary = catcard_tss::summary(&bytes).ok_or("not a share record")?;
     store::save(gate, login, ui, &bytes)?;
-    crate::catlog!(
-        "tss: member {} of {} kept, {} B, pairs with {} members",
-        summary.member,
-        summary.n,
-        bytes.len(),
-        record.pairs().len()
-    );
     Ok(summary)
 }
 
@@ -343,7 +336,6 @@ impl Room {
         if need <= free {
             return true;
         }
-        crate::catlog!("tss: {} members need {} B, {} B free", n, need, free);
         say(ui, head, "too many members", "for this device's memory");
         false
     }

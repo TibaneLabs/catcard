@@ -8,9 +8,9 @@
 //! recovery of its own. A host then sends the PIN and a new image over USB, as in
 //! headless recovery.
 //!
-//! **Dev builds only** (`dev` + `usb-key-injection`). A shipped image compiles this out,
+//! **Dev builds only** (`dev` + `usb-recovery`). A shipped image compiles this out,
 //! so a host cannot ask a stranger's device to reflash itself; the recovery loop it jumps
-//! into already needs `usb-key-injection` to press keys. When CANCEL is not held the code
+//! into is the one place a host's PIN and yes are taken. When CANCEL is not held the code
 //! below does nothing but a ~200 ms key read and hands back to the ordinary boot, so a
 //! healthy device is untouched.
 //!

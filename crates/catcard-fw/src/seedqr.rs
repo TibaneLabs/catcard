@@ -139,7 +139,6 @@ pub(crate) fn export(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
     menu::message(ui.panel, HEAD, &said, "any key to show it");
     menu::wait_for_any_key(ui);
 
-    crate::catlog!("seedqr: showed {} words, {}", words, kind.name());
     // The symbol alone, as large as the panel allows: no text column beside it, because
     // the only text that could go there is the seed.
     menu::qr_screen_bytes(ui, &payload[..n], "");
@@ -173,7 +172,10 @@ pub(crate) fn received(
     let (mut ent, len, words) = match parsed {
         Ok(got) => got,
         Err(why) => {
-            crate::catlog!("seedqr: refused a scanned code: {:?}", why);
+            crate::catlog!(
+                "seedqr: refused a scanned code: {}",
+                crate::logbuf::Dbg(&why)
+            );
             menu::message(ui.panel, HEAD, refusal(why), "any key to go back");
             menu::wait_for_any_key(ui);
             return;
@@ -205,7 +207,6 @@ pub(crate) fn received(
             drop(master);
             let mut said: heapless::String<24> = heapless::String::new();
             let _ = write!(said, "{a:02X}{b:02X}{c:02X}{d:02X}");
-            crate::catlog!("seedqr: scanned {} words", words);
             crate::settings::open_wallet(gate, login, ui.panel, HEAD, [a, b, c, d]);
             menu::message(ui.panel, "Loaded", &said, "in force until reboot");
             menu::wait_for_any_key(ui);

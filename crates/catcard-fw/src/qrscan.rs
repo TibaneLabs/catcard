@@ -39,13 +39,6 @@ const WIRE_MS: u32 = 20;
 
 /// How long the reset line is held low: 10 ms, per the reference.
 const RESET_MS: u32 = 10;
-/// And how long the module needs afterwards before it will answer: two seconds.
-///
-/// Only the Debug probe waits this out blindly, because its question is "what does this
-/// module say when asked cold" and an answer that arrived because we kept asking would
-/// be a different measurement. Everything else polls to [`CONTACT_MS`] instead and
-/// carries on the moment the module speaks.
-const RECOVERY_MS: u32 = 2_000;
 
 /// Attempts at the configuration sequence, as stock bounds it.
 const SETUP_TRIES: usize = 3;
@@ -494,11 +487,13 @@ pub(crate) fn boot_bringup() {
     // the probe gave up on and leaving the aimer lit for the whole session.
     match ensure(&mut port, scanner) {
         Ok(()) => {
-            crate::catlog!("qr: configured, sleeping");
             sleep(&mut port);
         }
         Err(why) => {
-            crate::catlog!("qr: not configured at boot: {:?}; blind shutdown", why);
+            crate::catlog!(
+                "qr: not configured at boot: {}; blind shutdown",
+                crate::logbuf::Dbg(&why)
+            );
             blind_shutdown(&mut port);
         }
     }
@@ -607,94 +602,6 @@ fn collect(
     outcome
 }
 
-/// Debug: ask the module for its version at each rate and report exactly what came back.
-///
-/// The scan screen can only say "the scanner did not answer", which is true of a module
-/// that is absent, one at a rate nothing is asking at, and one whose replies are not
-/// reaching the pin. Those want different fixes, and the log had no way to tell them
-/// apart: the torch reports "silence" for commands that visibly work, so the module
-/// hears us and we do not hear it, and the next question is whether anything at all
-/// arrives on PA3.
-///
-/// So this reports the raw truth per rate -- bytes in, the first of them, and whether
-/// the line showed a framing or overrun error, which is what "wrong rate" looks like as
-/// against "nothing connected".
-pub(crate) fn probe(ui: &mut Ui<'_>) {
-    use core::fmt::Write as _;
-
-    const HEAD: &str = "QR probe";
-    let Some(scanner) = catcard_board::BOARD.qr else {
-        menu::message(
-            ui.panel,
-            HEAD,
-            "this board has no scanner",
-            "any key to go back",
-        );
-        menu::wait_for_any_key(ui);
-        return;
-    };
-
-    crate::torch::release();
-    let _busy = menu::blocking_screen(ui.panel, HEAD, "resetting the module");
-    // SAFETY: as `scan_many` -- the board table's scanner pins and USART2 belong to this
-    // screen, and the menu waits for it to return.
-    // The one screen that always resets: its whole job is to answer "does this module
-    // say anything at all", from whatever state it is in. Which also means whatever
-    // this boot had configured is gone.
-    note_configured(false);
-    let mut port = unsafe {
-        catcard_hal::usart::pulse_reset(scanner.reset, ms_cycles(RESET_MS));
-        catcard_hal::dwt::delay_cycles(ms_cycles(RECOVERY_MS));
-        Usart::init(scanner.tx, scanner.rx, catcard_qr::BAUDS[0])
-    };
-
-    // The text is owned here and the rows borrow it afterwards: a `Line` holds a
-    // reference, and the obvious loop would hand it one that dies at the next iteration.
-    let mut said: heapless::Vec<heapless::String<64>, 8> = heapless::Vec::new();
-
-    // Both the framed query and a bare one. A module that answers neither is not
-    // talking; one that answers the bare command only is in a state the framing is
-    // wrong for, which is a different thing entirely.
-    for rate in catcard_qr::BAUDS {
-        port.set_baud(rate);
-        for (what, framed) in [("framed", true), ("bare", false)] {
-            port.flush_input();
-            let mut out = [0u8; 64];
-            if framed {
-                if let Ok(frame) = wrap(catcard_qr::FID_COMMAND, cmd::VERSION, &mut out) {
-                    let _ = port.write(frame, ms_cycles(WIRE_MS));
-                }
-            } else {
-                let _ = port.write(cmd::VERSION, ms_cycles(WIRE_MS));
-            }
-            // Generously: at 9600 a framed query is 17 ms on the wire before the module
-            // has even heard it, and the reply is another 8. The scan path's budget is
-            // tighter than that, which is itself worth knowing.
-            catcard_hal::dwt::delay_cycles(ms_cycles(120));
-            let mut reply = [0u8; 64];
-            let n = port.read_reply(&mut reply, ms_cycles(FIRST_MS), ms_cycles(GAP_MS));
-
-            let mut line: heapless::String<64> = heapless::String::new();
-            let _ = write!(line, "{rate} {what}: {n}B");
-            for b in reply.iter().take(6.min(n)) {
-                let _ = write!(line, " {b:02x}");
-            }
-            crate::catlog!("qr probe: {}", line.as_str());
-            let _ = said.push(line);
-        }
-    }
-
-    // Leave it as the scan screen would: stopped and asleep, not however it was found.
-    blind_shutdown(&mut port);
-
-    let mut rows: heapless::Vec<catcard_ui::scroll::Line, 10> = heapless::Vec::new();
-    let _ = rows.push(catcard_ui::scroll::Line::title("QR probe"));
-    for line in &said {
-        let _ = rows.push(catcard_ui::scroll::Line::body(line).small());
-    }
-    let _ = menu::show_doc(ui, &rows, false, false);
-}
-
 /// Milliseconds as CPU cycles.
 fn ms_cycles(ms: u32) -> u32 {
     // SAFETY: reads RCC only.
@@ -759,11 +666,6 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
             return;
         }
     };
-    crate::catlog!(
-        "qr: received {} bytes{}",
-        got.len,
-        if got.compressed { ", compressed" } else { "" }
-    );
 
     // A `Z` transfer reassembles the deflate stream, not the file. Expanding it is a
     // pass over the whole thing, so it says so -- on a payload this size it is not
@@ -772,10 +674,7 @@ pub(crate) fn screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut U
         let _busy = menu::blocking_screen(ui.panel, HEAD, "expanding");
         let max = catcard_board::BOARD.image_ceiling();
         match crate::inflate::staged(&mut area, got.len as u32, max) {
-            Ok(n) => {
-                crate::catlog!("qr: expanded to {} bytes", n);
-                n as usize
-            }
+            Ok(n) => n as usize,
             Err(why) => {
                 drop(area);
                 menu::message(ui.panel, HEAD, why, "any key to go back");
@@ -924,7 +823,6 @@ fn offer(
         // What it turned out to be, and whether a UR wrapper came off on the way. The
         // log had the failures and not the successes, which is the wrong way round when
         // the question is "it read something, but not the something I sent".
-        crate::catlog!("qr: {} bytes at +{}, {}", len, skip, what.note());
     }
     // Everything worth doing with it, as a list: what this firmware makes of the bytes,
     // and keeping them whatever they are. `choices` is shared with the tag, so a code and

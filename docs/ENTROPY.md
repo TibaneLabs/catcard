@@ -203,7 +203,7 @@ switch:
 - Non-hardware sources (timing, typed symbols) are unaffected -- and are never hardware
   sources, so they cannot stand in for a pending one.
 
-**Where it is enforced today:** New wallet (`new_seed`, and View TRNG Words, both in
+**Where it is enforced today:** New wallet (`new_seed`, in
 [`newseed.rs`](../crates/catcard-fw/src/newseed.rs)) calls
 `enforce_startup` and reads 1,024 fresh bytes from every source, so every source's window
 is complete before `check` and `draw`. Boot does not enforce it yet; see

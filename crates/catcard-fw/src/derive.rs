@@ -224,13 +224,11 @@ pub(crate) fn bip85(
     let (text, len, chosen) = match derived {
         Ok(d) => d,
         Err(why) => {
-            crate::catlog!("bip85: {} at {}: {}", ROWS[row], index, why);
             menu::message(ui.panel, HEAD, why, "any key to go back");
             menu::wait_for_any_key(ui);
             return None;
         }
     };
-    crate::catlog!("bip85: {} at index {}", ROWS[row], index);
     let text = core::str::from_utf8(&text[..len]).unwrap_or("");
     // A password can go out as keystrokes instead of being copied down, with the
     // keyboard on: Confirm on its screen is "type into host", as stock's (6) is.
@@ -296,7 +294,6 @@ pub(crate) fn type_password_screen(
             return;
         }
     };
-    crate::catlog!("bip85: password child at index {} to the keyboard", index);
     let password = core::str::from_utf8(&text[..n]).unwrap_or("");
     crate::usbkbd::send_screen(ui, TYPE_HEAD, &kind.path(index), password);
     // `text` is the `Zeroizing` buffer; it is wiped here, typed or not.

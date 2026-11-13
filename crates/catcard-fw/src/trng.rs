@@ -144,7 +144,7 @@ impl<'a> Trngs<'a> {
                     Ok(_) => FAILED_IN_A_ROW.store(0, Ordering::Relaxed),
                     Err(e) => {
                         let n = FAILED_IN_A_ROW.fetch_add(1, Ordering::Relaxed) + 1;
-                        crate::catlog!("trng: SE1 wire read failed: {:?}", e);
+                        crate::catlog!("trng: SE1 wire read failed: {}", crate::logbuf::Dbg(&e));
                         if n == GIVE_UP_AFTER {
                             crate::catlog!("trng: SE1 wire not answering; skipped from now on");
                         }

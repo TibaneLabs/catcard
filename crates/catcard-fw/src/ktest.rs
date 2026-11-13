@@ -198,28 +198,6 @@ extern "C" fn beat_task() -> ! {
             last = now;
             due = EVERY_MS;
             overflow_logged = !all_ok;
-            // The heap goes in the same line as the stacks, because they are the same
-            // question asked twice: how much of what was reserved is actually used.
-            // Reserving the worst case for everything at once is what left the boot
-            // stack too small to read a wallet, and these are the numbers that say
-            // whether the sizes chosen since are right.
-            let (used, peak, total) = crate::heap::stats();
-            crate::catlog!(
-                "kui t={} sw={} rec={} ui={}/{} beat={}/{} usb={}/{} heap={}/{} peak={} {}",
-                now,
-                catcard_kernel::switches(),
-                catcard_kernel::recovered(),
-                catcard_kernel::high_water(id(0)),
-                catcard_kernel::stack_len(id(0)),
-                catcard_kernel::high_water(id(1)),
-                catcard_kernel::stack_len(id(1)),
-                catcard_kernel::high_water(id(2)),
-                catcard_kernel::stack_len(id(2)),
-                used,
-                total,
-                peak,
-                if all_ok { "ok" } else { "OVERFLOW" }
-            );
         }
         catcard_kernel::yield_now();
     }

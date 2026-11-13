@@ -631,3 +631,30 @@ fn a_chain_that_does_not_fit_leaves_the_info_reply_whole() {
     let r = Info::decode(&out[..n]).unwrap();
     assert_eq!(r.count, 1);
 }
+
+// The numbers a host is written against: a scheme or a feature bit that moved would be
+// answered as something else.
+#[test]
+fn the_scheme_and_feature_numbers_are_pinned() {
+    assert_eq!(
+        [
+            scheme::BIP137,
+            scheme::BIP322,
+            scheme::BIP322_FULL,
+            scheme::EIP191,
+            scheme::TIP191,
+            scheme::EIP712,
+            scheme::SOLANA_OFFCHAIN,
+            scheme::SOLANA_OFFCHAIN_V0,
+        ],
+        [1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    assert_eq!(
+        [
+            feature::ADDRESS_AT,
+            feature::SIGN_MESSAGE,
+            feature::TYPED_DATA
+        ],
+        [1, 2, 4]
+    );
+}

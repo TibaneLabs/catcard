@@ -146,8 +146,8 @@ make q1 SHIP=1        # a real release: the USB debug crutches stripped
 make test lint        # host tests / clippy, as CI runs them
 ```
 
-A default build carries the bench crutches — host key injection, and a peek/poke/jsr
-memory monitor — because that is how the device is driven while the firmware is being
+A default build carries the bench crutches — a USB recovery loop (hold CANCEL at
+power-on) in which a host can approve an install, and a peek/poke/jsr memory monitor — because that is how the device is driven while the firmware is being
 built out. **`SHIP=1` is what strips them**, and nothing else should ever be given to
 someone else: `usb-debug-mem` reads the seed and the PIN out of RAM and runs arbitrary
 code. See [`docs/USB.md`](docs/USB.md).

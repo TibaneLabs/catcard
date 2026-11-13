@@ -191,7 +191,6 @@ fn check(
 
     match signfile::verify_with(&file, scratch) {
         Ok(scheme) => {
-            crate::catlog!("verify: {} good ({})", file.address, scheme.name());
             good(ui, &file, scheme, &checks);
         }
         // A cosigner's share: not a verdict on the message, and not a forgery either. The

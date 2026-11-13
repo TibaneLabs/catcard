@@ -73,16 +73,17 @@ enum Stage {
 
 pub struct UsbTask {
     otg: Otg,
-    /// Keys a host has pressed, waiting to be read by whichever screen is up.
-    ///
-    /// One deep. A host driving the UI is doing it a keystroke at a time and waiting to
-    /// see the result; queueing more would let it run ahead of the screen it is
-    /// answering, which is how a confirmation gets pressed before it is read.
-    #[cfg(feature = "usb-key-injection")]
+    /// Set by [`enter_recovery`]: the recovery loop owns the device, and only then are
+    /// a key and a PIN taken from a host.
+    #[cfg(feature = "usb-recovery")]
+    recovering: bool,
+    /// A key a host has pressed for the recovery loop (`crate::recovery`): `y`, `x`, or a
+    /// card slot. One deep, so a host cannot answer a question before it is asked.
+    #[cfg(feature = "usb-recovery")]
     injected: Option<u8>,
     /// A whole PIN a host has submitted with [`Opcode::UnlockPin`], waiting for the
     /// login loop to drive it through the gate. `prefix-suffix` ASCII, unparsed.
-    #[cfg(feature = "usb-key-injection")]
+    #[cfg(feature = "usb-recovery")]
     unlock_pin: Option<heapless::Vec<u8, 33>>,
     /// Reports taken from the host, and replies handed back. Shown on the idle screen
     /// because the emulator decodes that screen to text, which makes it the only
@@ -367,9 +368,11 @@ impl UsbTask {
         };
         Some(Self {
             otg,
-            #[cfg(feature = "usb-key-injection")]
+            #[cfg(feature = "usb-recovery")]
+            recovering: false,
+            #[cfg(feature = "usb-recovery")]
             injected: None,
-            #[cfg(feature = "usb-key-injection")]
+            #[cfg(feature = "usb-recovery")]
             unlock_pin: None,
             rx_count: 0,
             tx_count: 0,
@@ -1272,8 +1275,11 @@ impl UsbTask {
                 self.begin_reply(Status::Ok, &body[..n]);
             }
             Some(Opcode::Identify) => self.identify(),
-            #[cfg(feature = "usb-key-injection")]
+            #[cfg(feature = "usb-recovery")]
             Some(Opcode::InjectKey) => match progress.payload.first() {
+                // Only for the recovery loop. An ordinary session answers as a build
+                // without the feature does.
+                _ if !self.recovering => self.begin_reply(Status::UnknownOpcode, &[]),
                 Some(&k)
                     if k <= 9 || k == catcard_usb::KEY_CANCEL || k == catcard_usb::KEY_CONFIRM =>
                 {
@@ -1282,14 +1288,16 @@ impl UsbTask {
                 }
                 _ => self.begin_reply(Status::BadRequest, &[]),
             },
-            #[cfg(not(feature = "usb-key-injection"))]
+            #[cfg(not(feature = "usb-recovery"))]
             Some(Opcode::InjectKey) => self.begin_reply(Status::UnknownOpcode, &[]),
-            #[cfg(feature = "usb-key-injection")]
+            #[cfg(feature = "usb-recovery")]
             Some(Opcode::UnlockPin) => {
                 // Stash it; the login loop consumes it and answers with the UNLOCKED
                 // state bit on the next Identify. Ok here means only "accepted".
                 let p = progress.payload;
-                if p.is_empty() || p.len() > 33 {
+                if !self.recovering {
+                    self.begin_reply(Status::UnknownOpcode, &[]);
+                } else if p.is_empty() || p.len() > 33 {
                     self.begin_reply(Status::BadRequest, &[]);
                 } else {
                     let mut v = heapless::Vec::new();
@@ -1298,7 +1306,7 @@ impl UsbTask {
                     self.begin_reply(Status::Ok, &[]);
                 }
             }
-            #[cfg(not(feature = "usb-key-injection"))]
+            #[cfg(not(feature = "usb-recovery"))]
             Some(Opcode::UnlockPin) => self.begin_reply(Status::UnknownOpcode, &[]),
             Some(Opcode::UpgradeCommit) => {
                 // A host can ask, but only the device can answer. Approval happens at
@@ -1432,7 +1440,7 @@ impl UsbTask {
                 self.begin_reply(Status::Ok, &[]);
             }
             Err(e) => {
-                crate::catlog!("ncry: pairing refused: {:?}", e);
+                crate::catlog!("ncry: pairing refused: {}", crate::logbuf::Dbg(&e));
                 // A reveal that missed its commitment is a dropped handshake, and counts.
                 self.pair_guard.dropped();
                 self.begin_reply(Status::BadRequest, &[]);
@@ -1851,28 +1859,35 @@ impl UsbTask {
         });
         at += 1;
         // What this build will accept, so a host does not have to discover it by being
-        // refused -- and so an operator can see whether key injection is compiled in.
-        body[at] = if cfg!(feature = "usb-key-injection") {
+        // refused. A key and a PIN are taken from a host only by the recovery loop.
+        #[cfg(feature = "usb-recovery")]
+        let recovery_caps = if self.recovering {
             catcard_usb::caps::KEY_INJECTION | catcard_usb::caps::UNLOCK_PIN
         } else {
             0
-        } | if staging::has_staging() {
-            // The compressed offer reaches the same staging area through the same
-            // checks, so it is available exactly when staging is.
-            catcard_usb::caps::UPGRADE | catcard_usb::caps::UPGRADE_PACKED
-        } else {
-            0
-        } | if cfg!(feature = "usb-debug-mem") {
-            catcard_usb::caps::DEBUG_MEM
-        } else {
-            0
-        } | if self.drbg.is_some() {
-            // The host-wallet commands only ever run on a paired session, so they are
-            // advertised exactly when pairing is.
-            catcard_usb::caps::PAIRING | catcard_usb::caps::HOST_WALLET
-        } else {
-            0
         };
+        #[cfg(not(feature = "usb-recovery"))]
+        let recovery_caps = 0;
+        body[at] = recovery_caps
+            | if staging::has_staging() {
+                // The compressed offer reaches the same staging area through the same
+                // checks, so it is available exactly when staging is.
+                catcard_usb::caps::UPGRADE | catcard_usb::caps::UPGRADE_PACKED
+            } else {
+                0
+            }
+            | if cfg!(feature = "usb-debug-mem") {
+                catcard_usb::caps::DEBUG_MEM
+            } else {
+                0
+            }
+            | if self.drbg.is_some() {
+                // The host-wallet commands only ever run on a paired session, so they are
+                // advertised exactly when pairing is.
+                catcard_usb::caps::PAIRING | catcard_usb::caps::HOST_WALLET
+            } else {
+                0
+            };
         at += 1;
         for s in [crate::running_board(), VERSION] {
             let b = s.as_bytes();
@@ -1888,7 +1903,7 @@ impl UsbTask {
         // The host gets a one-byte code; the details -- an offset, a length, which key --
         // were thrown away. They are exactly what a refused install needs to be diagnosed,
         // and the log is where a host can read them back.
-        crate::catlog!("upgrade: refused {:?}", reason);
+        crate::catlog!("upgrade: refused {}", crate::logbuf::Dbg(&reason));
         let mut body = [0u8; 64];
         let n = describe_reject(&reason, &mut body);
         self.begin_reply(Status::Refused, &body[..n]);
@@ -2984,7 +2999,6 @@ fn sd_diag() -> (u8, u32, u32) {
                 return (0, 0, 0);
             }
         };
-    crate::catlog!("sddiag: ctrl up present={}", Transport::card_present(&dev));
     let card = match catcard_sd::init(&mut dev) {
         Ok(c) => c,
         Err(_) => {
@@ -2992,44 +3006,17 @@ fn sd_diag() -> (u8, u32, u32) {
             return (1, dev.status(), dev.dcount());
         }
     };
-    crate::catlog!(
-        "sddiag: blocks={} wide={} block_addr={}",
-        card.blocks,
-        card.wide,
-        matches!(card.addressing, catcard_sd::Addressing::BlockAddressed)
-    );
 
     // Read block 0 by hand so CMD17's response and the data path are each visible.
     dev.arm_block_read();
-    crate::catlog!(
-        "sddiag: armed sta={:#010x} dcount={}",
-        dev.status(),
-        dev.dcount()
-    );
-    let r1 = match dev.command(17, 0, Response::Short) {
-        Ok(r) => r[0],
-        Err(_) => {
-            crate::catlog!("sddiag: CMD17 FAIL sta={:#010x}", dev.status());
-            return (2, dev.status(), dev.dcount());
-        }
-    };
-    crate::catlog!(
-        "sddiag: cmd17 r1={:#010x} sta={:#010x} dcount={}",
-        r1,
-        dev.status(),
-        dev.dcount()
-    );
+    if dev.command(17, 0, Response::Short).is_err() {
+        crate::catlog!("sddiag: CMD17 FAIL sta={:#010x}", dev.status());
+        return (2, dev.status(), dev.dcount());
+    }
 
     let mut blk = [0u8; catcard_sd::BLOCK_LEN];
     let (phase, sta, dcount) = match dev.read_data(&mut blk) {
-        Ok(()) => {
-            crate::catlog!(
-                "sddiag: read OK 55aa={} sta={:#010x}",
-                blk[510] == 0x55 && blk[511] == 0xAA,
-                dev.status()
-            );
-            (4, dev.status(), dev.dcount())
-        }
+        Ok(()) => (4, dev.status(), dev.dcount()),
         Err(_) => {
             crate::catlog!(
                 "sddiag: read FAIL sta={:#010x} dcount={}",
@@ -3085,20 +3072,6 @@ fn sd_diag() -> (u8, u32, u32) {
         Err(_) => crate::catlog!("sddiag: FAT mount FAIL (block read works, fs did not)"),
     }
     (phase, sta, dcount)
-}
-
-/// The OTG endpoint registers, for the debug screen.
-///
-/// `[GINTSTS, DAINT, DOEPCTL, DOEPTSIZ, DIEPCTL, DCTL]`. On hardware there is no RAM
-/// dump to read these out of, so the screen is the only place they can be seen.
-pub fn otg_regs() -> Option<[u32; 6]> {
-    // SAFETY: single-threaded boot path; the task owns OTG_FS and this only reads.
-    with_task(|t| unsafe { t.otg.debug_regs() })
-}
-
-/// `(resets, reinits, rearms)` for the debug screen, or zeros before USB is up.
-pub fn recovery_counts() -> (u32, u32, u32) {
-    with_task(|t| t.otg.recovery_counts()).unwrap_or((0, 0, 0))
 }
 
 /// Why USB did not come up, as a word that fits on the screen. Empty if it did.
@@ -3303,15 +3276,6 @@ pub fn pending() -> Option<Approval> {
     with_task(|t| t.pending().cloned()).flatten()
 }
 
-/// Whether an upgrade is staged and waiting, without copying it.
-///
-/// [`pending`] clones a whole `FirmwareHeader` and its signature -- fine for the run
-/// loop, which wants the thing itself once per frame, but wasteful for a caller that
-/// only asks whether something is there.
-pub fn has_pending() -> bool {
-    with_task(|t| t.pending().is_some()).unwrap_or(false)
-}
-
 /// Approve the staged upgrade, publishing the bootloader's marker.
 pub fn approve() -> Result<catcard_upgrade::Region, Reject> {
     with_task(|t| t.approve()).unwrap_or(Err(Reject::NotAnImage))
@@ -3405,59 +3369,26 @@ fn publish_status(t: &UsbTask) {
     unsafe { core::ptr::write_volatile(core::ptr::addr_of_mut!(CATCARD_USB_STATUS), s) };
 }
 
-/// USB state, for the idle screen.
-///
-/// `(configured, reports in, replies out, a reply is queued)`. Four numbers is enough to
-/// tell "the host is not talking to us" from "we are not answering" from "we answered
-/// and it did not go out", which are three very different bugs that look identical from
-/// the outside.
-pub fn stats() -> (bool, u32, u32, bool) {
-    with_task(|t| {
-        (
-            t.otg.is_configured(),
-            t.rx_count,
-            t.tx_count,
-            t.outbox_len > 0,
-        )
-    })
-    .unwrap_or((false, 0, 0, false))
+/// The recovery loop has the device: from here a host's key and PIN are taken.
+#[cfg(feature = "usb-recovery")]
+pub fn enter_recovery() {
+    let _ = with_task(|t| t.recovering = true);
 }
 
-/// A key a host has pressed, if any. Consumes it.
-///
-/// Returns `None` on a build without `usb-key-injection`, so every caller compiles
-/// either way and the feature is one line in `Cargo.toml` rather than a thread through
-/// the UI.
+/// A key a host has pressed for the recovery loop, if any. Consumes it.
+#[cfg(feature = "usb-recovery")]
 pub fn take_injected_key() -> Option<catcard_ui::keypad::Key> {
-    #[cfg(not(feature = "usb-key-injection"))]
-    {
-        None
-    }
-    #[cfg(feature = "usb-key-injection")]
-    {
-        use catcard_ui::keypad::Key;
-        let k = with_task(|t| t.injected.take()).flatten()?;
-        Some(match k {
-            catcard_usb::KEY_CANCEL => Key::Cancel,
-            catcard_usb::KEY_CONFIRM => Key::Confirm,
-            d => Key::Digit(d),
-        })
-    }
+    use catcard_ui::keypad::Key;
+    let k = with_task(|t| t.injected.take()).flatten()?;
+    Some(match k {
+        catcard_usb::KEY_CANCEL => Key::Cancel,
+        catcard_usb::KEY_CONFIRM => Key::Confirm,
+        d => Key::Digit(d),
+    })
 }
 
-/// A whole PIN a host has submitted over USB, if any. Consumes it.
-///
-/// `None` without `usb-key-injection`, so the login loop calls it unconditionally.
+/// A whole PIN a host has submitted to the recovery loop, if any. Consumes it.
+#[cfg(feature = "usb-recovery")]
 pub fn take_unlock_pin() -> Option<heapless::Vec<u8, 33>> {
-    #[cfg(not(feature = "usb-key-injection"))]
-    {
-        None
-    }
-    #[cfg(feature = "usb-key-injection")]
-    {
-        with_task(|t| t.unlock_pin.take()).flatten()
-    }
+    with_task(|t| t.unlock_pin.take()).flatten()
 }
-
-/// Whether this build accepts injected keys, for the screen to say so.
-pub const KEY_INJECTION: bool = cfg!(feature = "usb-key-injection");

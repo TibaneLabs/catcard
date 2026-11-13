@@ -452,14 +452,6 @@ pub fn reset_origin(panel: &mut Panel) {
     unsafe { (*core::ptr::addr_of_mut!(ROWS_SENT)).invalidate() };
 }
 
-/// On the OLED a redraw covers the whole panel, so there is nothing to clear -- but the
-/// next one has to actually be sent, which it would not be if it happened to match what
-/// the cache believes is already there.
-#[cfg(not(feature = "board-q1"))]
-pub fn wipe(_panel: &mut Panel) {
-    forget_frame();
-}
-
 /// Hand the busy bar to the panel itself, so it keeps moving while the CPU cannot draw.
 ///
 /// A callgate call -- a PIN check, a secret fetch -- runs with interrupts masked for a
@@ -916,7 +908,6 @@ fn start(panel: &mut Panel) -> Option<catcard_ui::sweep::Lease> {
     let n = catcard_ui::sweep::fill_from(buf.bytes(), phase)?;
     let at = buf.bytes().as_ptr() as u32;
     if at < CALLGATE_SRAM.end && at + n as u32 > CALLGATE_SRAM.start {
-        crate::catlog!("sweep: buffer at {:#010x} is in the callgate's SRAM", at);
         return None;
     }
     // The sweep's own handle on SPI1, so it can be stopped without the panel.
@@ -1456,8 +1447,6 @@ fn draw_keeping_marks(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mu
     // SAFETY: `DRAWING` makes this the only live reference to `SCREEN`; the firmware is
     // single-threaded and nothing draws from interrupt context.
     let screen = unsafe { &mut *core::ptr::addr_of_mut!(SCREEN) };
-    #[cfg(all(feature = "board-q1", feature = "dev"))]
-    let t0 = catcard_hal::dwt::cycles();
     #[cfg(feature = "board-q1")]
     {
         // The screen paints into the rows below the bar, then the bar goes on top of its
@@ -1473,24 +1462,7 @@ fn draw_keeping_marks(panel: &mut Panel, content: &[u16; 16], f: impl FnOnce(&mu
     f(screen);
     #[cfg(feature = "board-q1")]
     BAR_SHOWN.store(true, Ordering::SeqCst);
-    #[cfg(all(feature = "board-q1", feature = "dev"))]
-    let t1 = catcard_hal::dwt::cycles();
     show(panel, screen, content, BAR_H);
-    // Where a frame's time goes, on development builds: painting the canvas, then sending
-    // what changed (and how many rows that was).
-    #[cfg(all(feature = "board-q1", feature = "dev"))]
-    {
-        let t2 = catcard_hal::dwt::cycles();
-        // SAFETY: reads RCC.
-        let per_us = (unsafe { catcard_hal::clock::hclk_hz() } / 1_000_000).max(1);
-        crate::catlog!(
-            "frame: render {} us, send {} us, {} rows",
-            t1.wrapping_sub(t0) / per_us,
-            t2.wrapping_sub(t1) / per_us,
-            // SAFETY: foreground, single core, outside the flush.
-            unsafe { *core::ptr::addr_of!(ROWS_LAST) }
-        );
-    }
     DRAWING.store(false, Ordering::SeqCst);
 }
 
@@ -1797,7 +1769,6 @@ pub unsafe fn init() -> Option<Panel> {
             gpio::write(bl, true);
         }
     }
-    crate::catlog!("display: ST7789 inherited, backlight on");
     Some(panel)
 }
 
@@ -1943,6 +1914,5 @@ unsafe fn enable_panel_rail() {
         // Real milliseconds: a boost converter needs a few, and the early board revs that
         // actually depend on this pin are the ones that most need the settle.
         catcard_hal::dwt::delay_ms(50);
-        crate::catlog!("display: V12EN (PC1) driven high, mk5 strap low");
     }
 }
