@@ -148,6 +148,11 @@ jobs:
           fi
           # Plain `[ … ] && x=y` would return non-zero on the false leg and `set -e`
           # would end the step there.
+          # Threshold signing ships on every board that has the flash for it; the mk3
+          # does not.
+          if [ "$board" != mk3 ]; then
+            feats="$feats,tss"
+          fi
           if [ "${{ matrix.games }}" = true ]; then
             feats="$feats,games"
             name="$name-games"
@@ -176,9 +181,8 @@ jobs:
           echo "compat=$compat" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      # `--no-default-features` drops `usb-debug-mem`, `usb-key-injection` and `dev`: the
-      # release shape, as `make <board> SHIP=1` builds it. `games` is added back for the
-      # images that carry them.
+      # `--no-default-features` drops `usb-debug-mem`, `usb-recovery` and `dev`: the
+      # release shape. `tss` and `games` are added back for the images that carry them.
       - name: Build
         env:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ steps.shape.outputs.opt }}

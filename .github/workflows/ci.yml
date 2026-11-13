@@ -75,7 +75,7 @@ jobs:
           esac
           # No bench crutches in anything published. `usb-debug-mem` is peek / poke /
           # jsr on any address -- it would read the seed and the PIN out of RAM and run
-          # arbitrary code -- and `usb-key-injection` lets a host press the keys, which
+          # arbitrary code -- and `usb-recovery` lets a host answer for the person in the recovery loop, which
           # removes the physical-presence confirmation the rest of the design rests on,
           # including approving a firmware upgrade. These artefacts are downloadable by
           # anyone, so they are built the way a release is: neither feature compiled in.
@@ -87,6 +87,11 @@ jobs:
           fi
           # Plain `[ … ] && x=y` would return non-zero on the false leg and `set -e`
           # would end the step there -- silently, on half the matrix.
+          # Threshold signing ships on every board that has the flash for it; the mk3
+          # does not.
+          if [ "$board" != mk3 ]; then
+            feats="$feats,tss"
+          fi
           if [ "${{ matrix.games }}" = true ]; then
             feats="$feats,games"
             name="$name-games"
