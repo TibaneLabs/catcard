@@ -228,8 +228,8 @@ impl Parts {
     pub fn recombine(&self, out: &mut [u8], _kw: &crate::KeyWork) -> usize {
         let n = out.len().min(self.len);
         out[..n].fill(0);
-        for i in 0..self.count {
-            xor_into(&mut out[..n], &self.data[i][..n]);
+        for part in self.data.iter().take(self.count) {
+            xor_into(&mut out[..n], &part[..n]);
         }
         n
     }

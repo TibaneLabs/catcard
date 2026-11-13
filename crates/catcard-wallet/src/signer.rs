@@ -45,14 +45,11 @@ use crate::tx::sighash::SIGHASH_ALL;
 /// Source: BIP-174 "If a sighash type is not provided, the signer should sign using
 /// SIGHASH_ALL" [C]
 pub fn sighash_allowed(kind: u32) -> bool {
-    if kind == SIGHASH_ALL {
-        return true;
-    }
     #[cfg(feature = "multichain")]
     if kind == SIGHASH_ALL | u32::from(crate::tx::unified::SIGHASH_UNIFIED) {
         return true;
     }
-    false
+    kind == SIGHASH_ALL
 }
 
 /// What to do with an input asking for a sighash type [`sighash_allowed`] refuses.

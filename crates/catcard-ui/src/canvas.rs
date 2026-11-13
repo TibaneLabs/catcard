@@ -436,8 +436,8 @@ mod inset_tests {
             view.clear();
         }
         assert_eq!(grid.0[0], [INK; 4], "clear wiped the status bar");
-        for row in 1..4 {
-            assert_eq!(grid.0[row], [PAPER; 4], "row {row} was not cleared");
+        for (row, cells) in grid.0.iter().enumerate().skip(1) {
+            assert_eq!(*cells, [PAPER; 4], "row {row} was not cleared");
         }
     }
 
