@@ -42,7 +42,7 @@ published images themselves, the mk3, and the CANCEL-at-power-on reflash were no
 
 - Review screens scroll half a screen a key. On the Q1 they keep `ENTER` and `CANCEL`
   labelled at the foot of the screen.
-- Seed words can be shown, and entered, as BitCan glyphs.
+- Seed words can be shown, and entered, as [BitCan](https://bitcan.world) glyphs.
 - Q1: the owner chooses which SD slot to use.
 - BBQr display speed is on the arrow keys.
 - The Debug menu is eleven rows. The bring-up screens are gone: TRNG words, bootloader
