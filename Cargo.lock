@@ -337,6 +337,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcard-sealed"
+version = "7.0.0"
+dependencies = [
+ "purecrypto",
+ "zeroize",
+]
+
+[[package]]
 name = "catcard-settings"
 version = "7.0.0"
 dependencies = [
