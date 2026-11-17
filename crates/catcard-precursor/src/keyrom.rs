@@ -123,3 +123,21 @@ pub fn report(out: &mut impl Write) {
     }
     let _ = writeln!(out, "keyrom config           : {:08x}", read(CONFIG));
 }
+
+/// Closes the USB debug bridge for the rest of this boot: every request it makes is
+/// remapped to 0x8000_0000, so it can no longer read SRAM, the key ROM or flash.
+///
+/// Called on a provisioned unit only. On an unprovisioned one the bridge stays open:
+/// it is how `run.py` and `usb_update.py` reach the device, and there is no device
+/// secret for it to take (a zero-key gateware gives up its key ROM to anyone with the
+/// flash anyway). It is no defence before this line runs: the boot ROM and loader come
+/// first, which is why provisioning waits for gateware v0.9.14 (docs/PRECURSOR-KEYS.md).
+/// Source: betrusted_soc.py `usbdisable` CSRStorage, "remapping all wishbone request
+/// addresses to 0x8000_0000", wired to `debug_bridge.disable_wb` (gpio block in
+/// v0.9.5, `usbdev` block from the SpinalHDL USB core on) [C].
+pub fn close_usb_bridge() {
+    #[cfg(feature = "gw-v0_9_5")]
+    csr::write(reg::GPIO_USBDISABLE, 1);
+    #[cfg(feature = "gw-v0_9_14")]
+    csr::write(reg::USBDEV_USBDISABLE, 1);
+}

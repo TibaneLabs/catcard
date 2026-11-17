@@ -90,6 +90,10 @@ extern "C" fn rust_main() -> ! {
     // The device secret, once, then the secret slots are locked for the rest of this boot.
     let ds = keyrom::device_secret();
     keyrom::lock_secrets();
+    if ds.is_some() {
+        keyrom::close_usb_bridge();
+        let _ = writeln!(out, "usb debug bridge        : closed");
+    }
     let _ = writeln!(
         out,
         "keyrom device secret    : {}, slots now {}",
