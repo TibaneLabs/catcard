@@ -75,7 +75,8 @@ The PIN adds its own questions, all on the same approval page, each naming the w
 | **Register** / **Sign in** / **Manage passkeys** at *site*, "With the PIN typed on the computer." | the browser has the PIN and wants a token for that; asked *before* the PIN is tried |
 | **Delete passkey?** | Settings → Hardware On/Off → Security key → Passkeys, one picked |
 
-A passkey registration adds "Saved on this device as a passkey." to the Register question.
+A passkey registration adds "Passkey: the seed alone won't restore it." to the Register
+question, and a reminder to back passkeys up after it (see [Backing passkeys up](#backing-passkeys-up)).
 
 ## What is supported
 
@@ -245,6 +246,36 @@ So **a restored seed plus the file** recovers every passkey, a restored seed alo
 *login* whose site still sends an allow list; the file says nothing to anyone without the
 wallet; and a reset -- which changes the master -- leaves nothing that opens (the old file
 is removed as well).
+
+### Backing passkeys up
+
+The seed does not restore a passkey, so the file has a backup copy:
+
+| | |
+|---|---|
+| made by | Security key → **Back up passkeys**, and every wallet **Backup** of the stored wallet (written beside the `.7z`, same storage) |
+| name | `passkeys-<XFP>.cpk`, numbered `-2`, `-3` rather than overwriting |
+| format | `"CPKB"` ‖ version 1 ‖ generation (u32 LE) ‖ the sealed file, byte for byte (`passkeys::export`) |
+| protection | the sealed file's own: AES-256-CTR + HMAC-SHA-256 under keys from this wallet's FIDO master. No backup password: nothing in it opens without the seed |
+| restored by | Security key → **Restore passkeys**: the tag is checked under this wallet's key before anything changes, then the passkeys are merged in (what is missing added, duplicates left, the rest counted if 50 are reached) |
+
+**Why not inside the `.7z`?** The archive is built in a 4 KB buffer, and the passkey file
+can be 14 KB -- as hex or base64 more than the 32 KB heap could hold beside the archive.
+A file of its own needs no extra memory and no second password.
+
+**The generation travels with the copy.** A wallet restore does not carry the backup's
+settings, so a restored wallet is at generation 0 whatever it was. A copy from another
+generation is still this wallet's, but its passkeys sign under that generation's keys.
+Restoring it means moving the wallet to that generation, asked on the approval page with
+the 7 key ("Switch security key? Logins made since then stop working. Older logins work
+again."). That is the one way back from a reset, too: a reset is undone by restoring a copy
+made before it.
+
+**Every passkey registration says so.** The Register question for a passkey reads
+"Passkey: the seed alone won't restore it." (above the wallet line, which a small panel
+drops first), and once the answer has gone back the device shows two pages, each for 8 s
+or until a key: "Passkey saved / seed alone won't restore passkeys" and where to back them
+up.
 
 On the device: Settings → Hardware On/Off → Security key → **Passkeys** lists them (site
 and account), and picking one asks **Delete passkey?** on the approval page.

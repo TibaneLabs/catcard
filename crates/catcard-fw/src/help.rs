@@ -453,6 +453,7 @@ feature!(
     [
         "On / Off: whether computers see this wallet's FIDO2 / U2F security key.",
         "Passkeys: logins kept on this device for sites that sign in without a username. Pick one to delete it.",
+        "The seed alone does not restore passkeys. Back up passkeys writes them to the card, still encrypted; Restore passkeys adds them back on this or another device with the same seed.",
         "The security-key PIN is set and changed from the browser, and asked on this screen. Only a reset from the browser removes it, with every passkey.",
     ]
 );

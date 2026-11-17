@@ -113,19 +113,20 @@ pub const fn file_len(records: usize) -> usize {
 pub const MAX_FILE: usize = file_len(CAPACITY);
 
 /// The buffer to open a stored file of `stored` bytes in (`None`: no file yet) with room
-/// for one more passkey, at most [`MAX_FILE`].
+/// for `more` passkeys more -- one for a registration, a backup's count for a restore --
+/// at most [`MAX_FILE`].
 ///
 /// The length alone does not say which version the file is, so the count is taken at the
 /// shorter, version 1 stride. For a version 2 file that is still exact: `n` records of
 /// [`REC_LEN`] bytes are `n` at the shorter stride too while `n` is under `REC_LEN_V1`
 /// (280), and [`CAPACITY`] is 50.
-pub const fn buffer_for(stored: Option<usize>) -> usize {
+pub const fn buffer_for(stored: Option<usize>, more: usize) -> usize {
     let count = match stored {
         Some(n) if n > file_len(0) => (n - file_len(0)) / REC_LEN_V1,
         _ => 0,
     };
-    let want = if count + 1 < CAPACITY {
-        count + 1
+    let want = if count + more < CAPACITY {
+        count + more
     } else {
         CAPACITY
     };
@@ -752,7 +753,7 @@ mod tests {
         ];
         let n = recs.len();
         let v1_len = FILE_HEAD + PLAIN_HEAD + n * REC_LEN_V1;
-        let mut buf = vec![0u8; buffer_for(Some(v1_len))];
+        let mut buf = vec![0u8; buffer_for(Some(v1_len), 1)];
         assert!(buf.len() >= file_len(n + 1), "room to widen, and one more");
         {
             let plain = &mut buf[FILE_HEAD..];
@@ -905,12 +906,15 @@ mod tests {
     /// The buffer size for a stored file counts its records right in either version.
     #[test]
     fn buffer_for_counts_both_versions() {
-        assert_eq!(buffer_for(None), file_len(1));
+        assert_eq!(buffer_for(None, 1), file_len(1));
+        assert_eq!(buffer_for(None, 9), file_len(9));
         for n in 0..=CAPACITY {
-            let want = file_len((n + 1).min(CAPACITY));
-            assert_eq!(buffer_for(Some(file_len(n))), want, "v2, {n}");
-            let v1 = FILE_HEAD + PLAIN_HEAD + n * REC_LEN_V1;
-            assert_eq!(buffer_for(Some(v1)), want, "v1, {n}");
+            for more in [1, 7] {
+                let want = file_len((n + more).min(CAPACITY));
+                assert_eq!(buffer_for(Some(file_len(n)), more), want, "v2, {n}+{more}");
+                let v1 = FILE_HEAD + PLAIN_HEAD + n * REC_LEN_V1;
+                assert_eq!(buffer_for(Some(v1), more), want, "v1, {n}+{more}");
+            }
         }
     }
 

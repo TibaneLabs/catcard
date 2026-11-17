@@ -254,10 +254,55 @@ pub(crate) fn save(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<
                 "keep the password safe"
             };
             menu::message(ui.panel, "Backed up", &name[1..], note);
+            menu::wait_for_any_key(ui);
+            #[cfg(not(feature = "board-mk3"))]
+            passkeys_beside(gate, login, ui, storage);
         }
         Err(why) => {
             crate::catlog!("backup: failed: {}", why);
             menu::message(ui.panel, "Backup failed", why, "any key to go back");
+            menu::wait_for_any_key(ui);
+        }
+    }
+}
+
+/// The security key's passkeys, written beside the backup they belong to.
+///
+/// The seed brings back every login but a passkey's -- the site and the account a passkey
+/// answers with were given once, at registration, and live only in the device's passkey
+/// file ([`catcard_fido::passkeys`]). That file is up to 14 KB, more than the archive's
+/// buffer and more than the heap could hold beside it, so it goes on the same storage as
+/// a file of its own, `passkeys-<XFP>.cpk`, still sealed under this wallet's key: no
+/// password to add, and nothing in it readable without the seed.
+///
+/// Only for the stored wallet, which is what the backup holds: another wallet in force
+/// has passkeys of its own, and they are not what this backup restores.
+#[cfg(not(feature = "board-mk3"))]
+fn passkeys_beside(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    storage: Storage,
+) {
+    if !crate::key::is_root() || crate::passphrase::is_set() {
+        return;
+    }
+    match crate::fido::backup_passkeys(gate, login, ui, storage) {
+        Ok(None) => return,
+        Ok(Some(name)) => menu::message(
+            ui.panel,
+            "Passkeys too",
+            &name[1..],
+            "restore: Security key",
+        ),
+        Err(why) => {
+            crate::catlog!("backup: passkeys not written: {}", why);
+            menu::message(
+                ui.panel,
+                "Passkeys NOT saved",
+                why,
+                "seed won't restore them",
+            );
         }
     }
     menu::wait_for_any_key(ui);

@@ -390,6 +390,9 @@ static PIN_SET: AtomicBool = AtomicBool::new(false);
 /// Passkeys the wallet in force can still store, [`UNKNOWN`] until its file was read
 /// this session. GetInfo's `remainingDiscoverableCredentials`.
 static REMAINING: AtomicU8 = AtomicU8::new(UNKNOWN);
+/// A passkey was saved by the request just answered: [`serve`] reminds the owner, once
+/// the answer has gone back, that the seed alone does not restore it.
+static PASSKEY_SAVED: AtomicBool = AtomicBool::new(false);
 const UNKNOWN: u8 = 0xFF;
 
 /// Whether this board keeps passkeys: the file lives in the internal-flash volume, which
@@ -480,6 +483,13 @@ pub(crate) fn serve(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui
     drop(req);
     usbtask::fido_status(false);
     usbtask::fido_finish(ticket, out, n);
+
+    // A passkey was just saved: the answer has gone back, so the reminder costs the
+    // site nothing.
+    #[cfg(not(feature = "board-mk3"))]
+    if PASSKEY_SAVED.swap(false, Ordering::Relaxed) {
+        backup_reminder(ui);
+    }
 
     // A U2F command that needed a press was refused just now, as U2F requires; the host
     // is already retrying. Ask here, where the answer can take its time.
@@ -776,7 +786,9 @@ impl Env for UiEnv<'_, '_> {
                         "This wallet already has a login here.",
                     )
                 } else if resident {
-                    ("Register", "Saved on this device as a passkey.")
+                    // Before the wallet line, which the page drops first on a small panel:
+                    // this is the line that must not be lost.
+                    ("Register", "Passkey: the seed alone won't restore it.")
                 } else {
                     ("Register", "")
                 }
@@ -945,12 +957,15 @@ impl Env for UiEnv<'_, '_> {
             if !self.random(&mut iv) {
                 return Err(ctap2::status::OTHER);
             }
-            passkey_file(&key, &iv, f)
+            passkey_file(&key, &iv, 1, f)
         }
     }
 
     fn note(&mut self, n: &Note<'_>) {
         log_note(n);
+        if n.command == ctap2::command::MAKE_CREDENTIAL && n.rk && n.status == ctap2::status::OK {
+            PASSKEY_SAVED.store(true, Ordering::Relaxed);
+        }
     }
 
     #[inline(never)]
@@ -1018,12 +1033,13 @@ fn passkey_path(key: &passkeys::PasskeyKey) -> heapless::String<32> {
 fn passkey_file(
     key: &passkeys::PasskeyKey,
     iv: &[u8; 16],
+    more: usize,
     f: &mut dyn FnMut(&mut Passkeys<'_>) -> bool,
 ) -> Result<(), u8> {
     use passkeys::CAPACITY;
     const FAIL: u8 = ctap2::status::OTHER;
     let path = passkey_path(key);
-    let (mut block, len) = read_passkey_file(&path)?;
+    let (mut block, len) = read_passkey_file(&path, more)?;
     let buf = block.bytes();
     let opened = match len {
         None => Passkeys::empty(buf),
@@ -1046,17 +1062,17 @@ fn passkey_file(
     Ok(())
 }
 
-/// The passkey file read into a heap block with room for one more passkey, and its
+/// The passkey file read into a heap block with room for `more` passkeys more, and its
 /// length (`None`: no file yet). A leaf of its own: the mount is kilobytes of frame.
 #[cfg(not(feature = "board-mk3"))]
 #[inline(never)]
-fn read_passkey_file(path: &str) -> Result<(crate::heap::Block, Option<usize>), u8> {
+fn read_passkey_file(path: &str, more: usize) -> Result<(crate::heap::Block, Option<usize>), u8> {
     const FAIL: u8 = ctap2::status::OTHER;
     // SAFETY: the region is mapped and readable; nothing is written through this.
     let mut files = unsafe { crate::settings::Files::mount_read_only() }.map_err(|_| FAIL)?;
     let len = files.file_len(path);
     // Room for one more, and for a version 1 file to widen as it opens.
-    let size = passkeys::buffer_for(len);
+    let size = passkeys::buffer_for(len, more);
     if len.is_some_and(|n| n > size) {
         crate::catlog!("fido: the passkey file is too large to be ours");
         return Err(FAIL);
@@ -1193,9 +1209,21 @@ pub(crate) fn switch_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui:
             if now.fido { "on" } else { "off" },
             if now.fido_pin { "set" } else { "not set" }
         );
-        match menu::pick_row(ui, HEAD, note.as_str(), &["On / Off", "Passkeys"]) {
+        match menu::pick_row(
+            ui,
+            HEAD,
+            note.as_str(),
+            &[
+                "On / Off",
+                "Passkeys",
+                "Back up passkeys",
+                "Restore passkeys",
+            ],
+        ) {
             Some(0) => {}
-            Some(_) => return passkeys_screen(gate, login, ui),
+            Some(1) => return passkeys_screen(gate, login, ui),
+            Some(2) => return backup_passkeys_screen(gate, login, ui),
+            Some(_) => return restore_passkeys(gate, login, ui),
             None => return,
         }
     }
@@ -1385,4 +1413,301 @@ fn delete_passkey(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'
     };
     menu::message(env.ui.panel, "Passkeys", said, site.as_str());
     menu::wait_for_any_key(env.ui);
+}
+
+// ---------------------------------------------------------------------------------------
+// Passkey backups: Security key -> Back up passkeys / Restore passkeys, and Backup
+// ---------------------------------------------------------------------------------------
+
+/// How long the reminder after a passkey registration stays up, per page, unless a key
+/// dismisses it sooner. Bounded: a request queued behind it waits this long at most.
+#[cfg(not(feature = "board-mk3"))]
+const REMINDER_MS: u32 = 8_000;
+
+/// Show `a`/`b` under `head` until a key is pressed or `ms` pass, keeping USB served.
+#[cfg(not(feature = "board-mk3"))]
+fn notice(ui: &mut Ui<'_>, head: &str, a: &str, b: &str, ms: u32) {
+    menu::message(ui.panel, head, a, b);
+    menu::wait_for_release(ui);
+    let started = now_ms();
+    let mut events = [KeyEvent::Pressed(Key::Cancel); KEYS];
+    let mut keys: heapless::Vec<Key, { KEYS + 1 }> = heapless::Vec::new();
+    while now_ms().wrapping_sub(started) < ms {
+        let _ = usbtask::pump();
+        crate::pinentry::pressed_keys(ui.pad, ui.matrix, ui.drbg, &mut events, &mut keys);
+        if !keys.is_empty() {
+            break;
+        }
+        display::idle(ui.panel);
+    }
+}
+
+/// After a passkey is saved: the seed alone will not bring it back, and where the backup
+/// is made. Two pages, each dismissed by any key or by time.
+#[cfg(not(feature = "board-mk3"))]
+fn backup_reminder(ui: &mut Ui<'_>) {
+    notice(
+        ui,
+        "Passkey saved",
+        "seed alone won't",
+        "restore passkeys",
+        REMINDER_MS,
+    );
+    notice(
+        ui,
+        "Back them up to SD",
+        "Hardware On/Off >",
+        "Security key > Back up",
+        REMINDER_MS,
+    );
+}
+
+/// The backup copy's name: `/passkeys-<XFP>.cpk`, the wallet's fingerprint in it as the
+/// wallet backup has, so two wallets' copies on one card neither collide nor need opening
+/// to tell apart.
+#[cfg(not(feature = "board-mk3"))]
+fn copy_name() -> heapless::String<{ menu::EXPORT_NAME_MAX }> {
+    let mut s: heapless::String<{ menu::EXPORT_NAME_MAX }> = heapless::String::new();
+    match crate::pubkeys::known_fingerprint() {
+        Some(fp) => {
+            let _ = write!(
+                s,
+                "/passkeys-{:02X}{:02X}{:02X}{:02X}.cpk",
+                fp[0], fp[1], fp[2], fp[3]
+            );
+        }
+        None => {
+            let _ = s.push_str("/passkeys.cpk");
+        }
+    }
+    s
+}
+
+/// Write the wallet in force's passkeys to `storage` as a backup copy
+/// ([`passkeys::export`]): the sealed file as it is, behind its generation. `Ok(None)`
+/// when the wallet has no passkeys, so there is nothing to back up.
+///
+/// Nothing is decrypted here: the copy is the file the device already keeps, which is
+/// noise to anyone without this wallet.
+#[cfg(not(feature = "board-mk3"))]
+#[inline(never)]
+pub(crate) fn backup_passkeys(
+    gate: &Callgate,
+    login: &mut catcard_pin::Login,
+    ui: &mut Ui<'_>,
+    storage: menu::Storage,
+) -> Result<Option<heapless::String<{ menu::EXPORT_NAME_MAX }>>, &'static str> {
+    let generation = crate::prefs::current()
+        .fido_gen
+        .ok_or("security key needs a reset")?;
+    let key = {
+        let mut env = UiEnv {
+            gate,
+            login,
+            ui: &mut *ui,
+            ticket: None,
+        };
+        env.with_master(|m, kw| m.passkey_key(kw))
+            .ok_or("no wallet to read them with")?
+    };
+    let path = passkey_path(&key);
+    let block = {
+        // SAFETY: the region is mapped and readable; nothing is written through this.
+        let mut files = unsafe { crate::settings::Files::mount_read_only() }
+            .map_err(|_| "cannot read the passkeys")?;
+        let Some(len) = files.file_len(&path) else {
+            return Ok(None);
+        };
+        if len > passkeys::MAX_FILE {
+            return Err("the passkey file is too large");
+        }
+        let mut block =
+            crate::heap::take(passkeys::EXPORT_HEAD + len).ok_or("not enough memory")?;
+        let buf = block.bytes();
+        match files.read_file(&path, &mut buf[passkeys::EXPORT_HEAD..]) {
+            Ok(Some(got)) if got == len => {}
+            _ => return Err("cannot read the passkeys"),
+        }
+        buf[..passkeys::EXPORT_HEAD].copy_from_slice(&passkeys::export_head(generation));
+        (block, passkeys::EXPORT_HEAD + len)
+    };
+    let (mut block, n) = block;
+    let mut note: heapless::String<24> = heapless::String::new();
+    let _ = write!(note, "writing to {}", storage.medium());
+    menu::card_wait(ui.panel, "Passkeys", &note);
+    let name = menu::write_storage_export(storage, &copy_name(), &block.bytes()[..n], None)?;
+    crate::catlog!("fido: passkeys backed up ({} B)", n);
+    Ok(Some(name))
+}
+
+/// Security key -> Back up passkeys.
+#[cfg(not(feature = "board-mk3"))]
+fn backup_passkeys_screen(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const TITLE: &str = "Back up passkeys";
+    let Some(storage) = menu::pick_storage(ui, TITLE) else {
+        return;
+    };
+    match backup_passkeys(gate, login, ui, storage) {
+        Ok(Some(name)) => menu::message(ui.panel, "Backed up", &name[1..], "with the seed: all"),
+        Ok(None) => menu::message(ui.panel, TITLE, "no passkeys", "for this wallet"),
+        Err(why) => menu::message(ui.panel, "Not backed up", why, "any key to go back"),
+    }
+    menu::wait_for_any_key(ui);
+}
+
+/// Security key -> Restore passkeys: read a backup copy, check it is this wallet's, and
+/// add the passkeys it holds to the ones here.
+///
+/// A copy made at another **generation** -- before or after a security-key reset -- is
+/// this wallet's but sealed under that generation's key, and its passkeys sign with that
+/// generation's keys. Restoring it means moving the wallet's generation to the copy's,
+/// which brings back every login of that generation and puts every one registered since
+/// out of reach until it is moved back. It is asked on the approval page, with the 7 key,
+/// and never done otherwise.
+#[cfg(not(feature = "board-mk3"))]
+#[inline(never)]
+fn restore_passkeys(gate: &Callgate, login: &mut catcard_pin::Login, ui: &mut Ui<'_>) {
+    const TITLE: &str = "Restore passkeys";
+    let fail = |ui: &mut Ui<'_>, a: &str, b: &str| {
+        menu::message(ui.panel, "Not restored", a, b);
+        menu::wait_for_any_key(ui);
+    };
+    let Some(storage) = menu::pick_storage(ui, TITLE) else {
+        return;
+    };
+    let Some(path) = menu::browse_storage(
+        ui,
+        storage,
+        "Pick passkeys",
+        Some("cpk"),
+        menu::Browse::File,
+    ) else {
+        return;
+    };
+    let Some(mut block) = crate::heap::take(passkeys::MAX_EXPORT) else {
+        return fail(ui, "not enough memory", "to read it");
+    };
+    let mut note: heapless::String<24> = heapless::String::new();
+    let _ = write!(note, "reading {}", storage.medium());
+    menu::card_wait(ui.panel, TITLE, &note);
+    let len = match crate::signtx::read_source_file(storage, &path, block.bytes()) {
+        Ok(n) => n,
+        Err(why) => return fail(ui, why, "any key to go back"),
+    };
+    let Some((generation, sealed_len)) =
+        passkeys::parse_export(&block.bytes()[..len]).map(|(g, f)| (g, f.len()))
+    else {
+        return fail(ui, "not a passkey", "backup file");
+    };
+    let current = crate::prefs::current().fido_gen;
+
+    // Whose is it? Checked under this wallet's key at the copy's generation, before
+    // anything is asked or changed.
+    let key = if current == Some(generation) {
+        let mut env = UiEnv {
+            gate,
+            login,
+            ui: &mut *ui,
+            ticket: None,
+        };
+        env.with_master(|m, kw| m.passkey_key(kw))
+    } else {
+        match menu::master_quietly(gate, login, ui.panel, TITLE) {
+            Ok(root) => Some(crate::keywork::run(|kw| {
+                Master::derive(&root, generation, kw).passkey_key(kw)
+            })),
+            Err(_) => None,
+        }
+    };
+    let Some(key) = key else {
+        return fail(ui, "no wallet", "to open it with");
+    };
+    let sealed = passkeys::EXPORT_HEAD..passkeys::EXPORT_HEAD + sealed_len;
+    if !passkeys::check(&key, &block.bytes()[sealed.clone()]) {
+        return fail(ui, "not this wallet's", "passkeys");
+    }
+
+    if current != Some(generation) {
+        let wallet = wallet_line();
+        let mut main: heapless::String<48> = heapless::String::new();
+        let _ = write!(main, "Use the security key the backup was made with?");
+        let mut env = UiEnv {
+            gate,
+            login,
+            ui: &mut *ui,
+            ticket: None,
+        };
+        let q = Question::new(
+            "Switch security key?",
+            main.as_str(),
+            &[
+                "Logins made since then stop working.",
+                "Older logins work again.",
+                wallet.as_str(),
+            ],
+            "switch",
+            "keep",
+        );
+        if env.ask(&q, Key::Digit(7)) != Presence::Allowed {
+            return;
+        }
+        let value = catcard_settings::prefs::fido_generation_value(generation);
+        let raw = crate::prefs::quoted(&value);
+        let now = crate::prefs::current();
+        let saved = crate::prefs::save_many(
+            gate,
+            login,
+            ui,
+            TITLE,
+            &[(catcard_settings::prefs::FIDO_GEN, raw.as_str())],
+            crate::prefs::Prefs {
+                fido_gen: Some(generation),
+                ..now
+            },
+        );
+        forget();
+        if !saved {
+            return fail(ui, "could not switch", "the security key");
+        }
+        crate::catlog!("fido: generation switched to {} from a backup", generation);
+    }
+
+    // Into this wallet's file at this generation, made if there is none: what it lacks
+    // is added, what it has is left. The block opened for that has room for every
+    // passkey in the copy.
+    let mut merged = passkeys::Merged::default();
+    let buf = block.bytes();
+    let Ok(from) = Passkeys::open(&key, &mut buf[sealed.start..], sealed_len) else {
+        return fail(ui, "the backup is damaged", "nothing changed");
+    };
+    let mut iv = [0u8; 16];
+    if ui.drbg.generate(&mut iv).is_err() {
+        return fail(ui, "no randomness", "nothing changed");
+    }
+    let done = passkey_file(&key, &iv, from.len(), &mut |to| {
+        merged = to.merge(&from);
+        merged.added > 0
+    })
+    .is_ok();
+    // The copy lies decrypted in the block until here; a block is wiped as it goes.
+    drop(block);
+    if !done {
+        return fail(ui, "could not write", "the passkeys");
+    }
+    crate::catlog!(
+        "fido: passkeys restored: {} added, {} already here, {} no room",
+        merged.added,
+        merged.already,
+        merged.no_room
+    );
+    let mut a: heapless::String<24> = heapless::String::new();
+    let _ = write!(a, "{} restored", merged.added);
+    let mut b: heapless::String<24> = heapless::String::new();
+    if merged.no_room > 0 {
+        let _ = write!(b, "{} did not fit", merged.no_room);
+    } else if merged.already > 0 {
+        let _ = write!(b, "{} already here", merged.already);
+    }
+    menu::message(ui.panel, "Passkeys", &a, &b);
+    menu::wait_for_any_key(ui);
 }
