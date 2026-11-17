@@ -47,6 +47,23 @@
 //!
 //! So a file says nothing to anyone without the wallet, a changed byte fails the tag, and
 //! a reset -- which changes the master -- leaves nothing that opens.
+//!
+//! # The backup copy
+//!
+//! A passkey is the one credential the seed alone does not bring back: the site, the
+//! account and the user handle were given once, at registration. So the file can be
+//! copied off the device ([`export`]) and read back ([`parse_export`]):
+//!
+//! ```text
+//! "CPKB" ‖ version 1 ‖ generation (u32 LE) ‖ the sealed file, byte for byte
+//! ```
+//!
+//! Nothing is decrypted to make it and nothing new is encrypted: the sealed file is
+//! already safe anywhere -- without the wallet it is noise, and with the wallet you have
+//! every login anyway. The generation travels with it because the key the file is sealed
+//! under depends on it, and a wallet restored from its seed starts again at zero. It is
+//! outside the tag, which costs nothing: a changed generation names a key the file was not
+//! sealed under, and [`check`] fails.
 
 use purecrypto::cipher::{Aes256, Ctr};
 use purecrypto::ct::ConstantTimeEq;
@@ -485,6 +502,104 @@ impl<'a> Passkeys<'a> {
     }
 }
 
+/// The backup copy's magic and version. See the module notes.
+pub const EXPORT_MAGIC: &[u8; 4] = b"CPKB";
+const EXPORT_VERSION: u8 = 1;
+/// The backup copy's header: magic, version, generation.
+pub const EXPORT_HEAD: usize = 4 + 1 + 4;
+/// The largest backup copy there can be.
+pub const MAX_EXPORT: usize = EXPORT_HEAD + MAX_FILE;
+
+/// The backup copy's header, for a sealed file of the given generation. The copy is this
+/// followed by the sealed file unchanged.
+pub fn export_head(generation: u32) -> [u8; EXPORT_HEAD] {
+    let mut h = [0u8; EXPORT_HEAD];
+    h[..4].copy_from_slice(EXPORT_MAGIC);
+    h[4] = EXPORT_VERSION;
+    h[5..].copy_from_slice(&generation.to_le_bytes());
+    h
+}
+
+/// Write the backup copy of `sealed` into `out`: its length, or `None` if it does not fit.
+pub fn export(generation: u32, sealed: &[u8], out: &mut [u8]) -> Option<usize> {
+    let n = EXPORT_HEAD + sealed.len();
+    out.get_mut(..EXPORT_HEAD)?
+        .copy_from_slice(&export_head(generation));
+    out.get_mut(EXPORT_HEAD..n)?.copy_from_slice(sealed);
+    Some(n)
+}
+
+/// A backup copy's generation and the sealed file inside it. Only the framing is checked:
+/// whether the file is this wallet's is [`check`]'s to say.
+pub fn parse_export(b: &[u8]) -> Option<(u32, &[u8])> {
+    if b.len() < EXPORT_HEAD + file_len(0) || b.len() > MAX_EXPORT || &b[..4] != EXPORT_MAGIC {
+        return None;
+    }
+    if b[4] != EXPORT_VERSION {
+        return None;
+    }
+    let generation = u32::from_le_bytes(b[5..9].try_into().ok()?);
+    Some((generation, &b[EXPORT_HEAD..]))
+}
+
+/// Whether `sealed` is a passkey file sealed under `key`: its magic and tag, checked in
+/// constant time, and nothing decrypted. A file that passes opens with
+/// [`Passkeys::open`] unless it was sealed wrong by the wallet's own key, which this
+/// firmware does not do.
+pub fn check(key: &PasskeyKey, sealed: &[u8]) -> bool {
+    if sealed.len() < file_len(0) || sealed.len() > MAX_FILE || &sealed[..4] != MAGIC {
+        return false;
+    }
+    let mut tag = file_tag(key, sealed);
+    let ok = bool::from(tag[..].ct_eq(&sealed[20..52]));
+    tag.zeroize();
+    ok
+}
+
+/// What [`Passkeys::merge`] did.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct Merged {
+    /// Passkeys this list did not have, now added.
+    pub added: usize,
+    /// Passkeys it already had, exactly: same credential, same site.
+    pub already: usize,
+    /// Passkeys there was no place for.
+    pub no_room: usize,
+}
+
+impl Passkeys<'_> {
+    /// Add every passkey of `from` this list does not already hold, oldest first so they
+    /// keep their order among themselves, all newer than what is here.
+    ///
+    /// One already here -- the same credential for the same site -- is left as it is.
+    /// One for the same site and account but another credential replaces the one here,
+    /// as a registration would ([`add`](Self::add)): the backup is what the owner chose
+    /// to restore. When the list fills, the rest are counted, not added.
+    pub fn merge(&mut self, from: &Passkeys<'_>) -> Merged {
+        let mut m = Merged::default();
+        let mut last: Option<u32> = None;
+        for _ in 0..from.len() {
+            // The next oldest of `from` after `last`: a selection without a sort buffer,
+            // at most 50 x 50 reads. Orders are distinct within a file.
+            let next = (0..from.len())
+                .filter_map(|i| from.get(i))
+                .filter(|r| last.is_none_or(|l| r.order > l))
+                .min_by_key(|r| r.order);
+            let Some(r) = next else { break };
+            last = Some(r.order);
+            if self.find(&r.rp_id_hash, &r.nonce).is_some() {
+                m.already += 1;
+                continue;
+            }
+            match self.add(&r) {
+                Ok(()) => m.added += 1,
+                Err(_) => m.no_room += 1,
+            }
+        }
+        m
+    }
+}
+
 /// Seal the list that was opened over `buf` (or made there with [`Passkeys::empty`]):
 /// the file's length. The plaintext is encrypted in place.
 pub fn seal_file(buf: &mut [u8], key: &PasskeyKey, iv: &[u8; 16]) -> usize {
@@ -687,6 +802,104 @@ mod tests {
         assert_eq!(p.get(n).unwrap().alg, Alg::EdDsa);
         assert_eq!(p.get(0).unwrap().alg, Alg::Es256);
         assert_eq!(p.get(n).unwrap().order, n as u32);
+    }
+
+    /// The backup copy carries the sealed file untouched and its generation; only this
+    /// wallet's key at that generation passes `check`, and nothing in the copy says
+    /// anything without it.
+    #[test]
+    fn a_backup_copy_round_trips_and_only_its_own_key_checks_it() {
+        let key = PasskeyKey::test(3);
+        let mut buf = vec![0u8; MAX_FILE];
+        let mut p = Passkeys::empty(&mut buf).unwrap();
+        p.add(&rec("example.com", b"u1", "alice")).unwrap();
+        let len = seal_file(&mut buf, &key, &[9; 16]);
+        let sealed = buf[..len].to_vec();
+
+        let mut out = vec![0u8; MAX_EXPORT];
+        let n = export(7, &sealed, &mut out).unwrap();
+        assert_eq!(n, EXPORT_HEAD + len);
+        assert_eq!(&out[..4], b"CPKB");
+        assert!(!out.windows(5).any(|w| w == b"alice"), "still sealed");
+        let (generation, inner) = parse_export(&out[..n]).unwrap();
+        assert_eq!(generation, 7);
+        assert_eq!(inner, &sealed[..]);
+        assert!(check(&key, inner));
+        assert!(
+            !check(&PasskeyKey::test(4), inner),
+            "another wallet or generation"
+        );
+        for at in [0, 4, 20, 40, len - 1] {
+            let mut bad = sealed.clone();
+            bad[at] ^= 1;
+            assert!(!check(&key, &bad), "byte {at}");
+        }
+        // Framing: the wrong magic or version, cut short, too long, no room to write.
+        let mut bad = out[..n].to_vec();
+        bad[0] = b'X';
+        assert_eq!(parse_export(&bad), None);
+        let mut bad = out[..n].to_vec();
+        bad[4] = 2;
+        assert_eq!(parse_export(&bad), None);
+        assert_eq!(parse_export(&out[..EXPORT_HEAD + 10]), None);
+        assert_eq!(parse_export(&vec![0u8; MAX_EXPORT + 1]), None);
+        assert_eq!(export(7, &sealed, &mut out[..n - 1]), None);
+    }
+
+    /// Restoring into a list that already has some: what is new is added, oldest first;
+    /// what is there already is left; and what does not fit is counted.
+    #[test]
+    fn merging_a_backup_adds_what_is_missing_and_says_what_did_not_fit() {
+        let mut from_buf = vec![0u8; MAX_FILE];
+        let mut from = Passkeys::empty(&mut from_buf).unwrap();
+        from.add(&rec("a.com", b"1", "first")).unwrap();
+        from.add(&rec("b.com", b"2", "second")).unwrap();
+        from.add(&rec("c.com", b"3", "third")).unwrap();
+        // Stored out of creation order, as removals leave a file.
+        let first = from.get(0).unwrap();
+        from.remove(0);
+        from.add(&first).unwrap();
+
+        let mut to_buf = vec![0u8; MAX_FILE];
+        let mut to = Passkeys::empty(&mut to_buf).unwrap();
+        to.add(&rec("b.com", b"2", "second")).unwrap();
+        to.add(&rec("z.com", b"9", "mine")).unwrap();
+        let m = to.merge(&from);
+        assert_eq!(
+            m,
+            Merged {
+                added: 2,
+                already: 1,
+                no_room: 0
+            }
+        );
+        assert_eq!(to.len(), 4);
+        // The two added are newer than everything here, in `from`'s own order -- which,
+        // after "first" was removed and added again, has it newest.
+        let h = |rp: &str| -> [u8; 32] { purecrypto::hash::Sha256::digest(rp.as_bytes()) };
+        let order = |rp: &str| to.get(to.newest_for(&h(rp), 0).unwrap()).unwrap().order;
+        assert!(order("z.com") < order("c.com"));
+        assert!(order("c.com") < order("a.com"));
+
+        // Merging again changes nothing.
+        assert_eq!(
+            to.merge(&from),
+            Merged {
+                added: 0,
+                already: 3,
+                no_room: 0
+            }
+        );
+
+        // A full list takes nothing new and counts it.
+        let mut full_buf = vec![0u8; MAX_FILE];
+        let mut full = Passkeys::empty(&mut full_buf).unwrap();
+        for i in 0..CAPACITY {
+            full.add(&rec("x.com", &[i as u8 + 10, 1], "n")).unwrap();
+        }
+        let m = full.merge(&from);
+        assert_eq!(m.added + m.no_room, 3);
+        assert_eq!(m.no_room, 3);
     }
 
     /// The buffer size for a stored file counts its records right in either version.
