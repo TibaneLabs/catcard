@@ -1,4 +1,4 @@
-//! The global allocator: `catcard-alloc` over the 4 MiB the linker script reserves after
+//! The global allocator: `catcard-alloc` over the 12 MiB the linker script reserves after
 //! `.bss`. Wallet code reads better with the odd `String` (an `xpub` is one), and there is
 //! room to spare in 16 MiB of SRAM.
 //!

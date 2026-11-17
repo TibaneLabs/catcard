@@ -19,9 +19,8 @@ use crate::trng::{self, Which};
 /// Bytes read per source: the 1024-byte start-up window and a margin.
 const PER_SOURCE: usize = 2048;
 
-/// A new mnemonic of `words` words, or why not.
-pub fn mnemonic(words: usize) -> Result<Mnemonic, String> {
-    let len = bip39::entropy_for_words(words).ok_or_else(|| String::from("bad word count"))?;
+/// A pool fed from both sources, start-up tested, or why not.
+fn pool() -> Result<EntropyPool, String> {
     let mut pool = EntropyPool::new(Policy::precursor());
     pool.enforce_startup();
     for which in [Which::Avalanche, Which::RingOsc] {
@@ -39,10 +38,21 @@ pub fn mnemonic(words: usize) -> Result<Mnemonic, String> {
     }
     // When it happened: unpredictable to the last millisecond only, credited nothing.
     pool.add(Source::Auxiliary, &crate::timer::now_ms().to_le_bytes());
+    Ok(pool)
+}
 
+/// A new mnemonic of `words` words, or why not.
+pub fn mnemonic(words: usize) -> Result<Mnemonic, String> {
+    let len = bip39::entropy_for_words(words).ok_or_else(|| String::from("bad word count"))?;
+    let mut pool = pool()?;
     let mut entropy = [0u8; 32];
     pool.draw(&mut entropy[..len]).map_err(|e| format!("{e}"))?;
     let made = crate::keywork::run(|kw| Mnemonic::from_entropy(&entropy[..len], kw));
     entropy.zeroize();
     made.map_err(|_| String::from("could not make the words"))
+}
+
+/// Fresh random bytes from the same pool discipline: salts and nonces.
+pub fn random(out: &mut [u8]) -> Result<(), String> {
+    pool()?.draw(out).map_err(|e| format!("{e}"))
 }

@@ -1,8 +1,9 @@
 //! What the device does: the menus and the flows behind them.
 //!
 //! Built on the portable crates, not on catcard-fw's menus, which are written against the
-//! Coldcard boards; see docs/PRECURSOR.md for why and for what is missing. The wallet is
-//! per power cycle (`session.rs`): nothing is stored yet.
+//! Coldcard boards; see docs/PRECURSOR.md for why and for what is missing. A wallet lives
+//! for the power cycle (`session.rs`) unless the owner stores it, sealed under a
+//! passphrase and the key ROM's device secret (`store.rs`, docs/PRECURSOR-KEYS.md).
 
 use alloc::format;
 use alloc::string::String;
@@ -12,9 +13,10 @@ use core::fmt::Write as _;
 use catcard_wallet::address::{self, AddressKind};
 use catcard_wallet::bip32::{ChildNumber, Network};
 use catcard_wallet::bip39::Mnemonic;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::session::Session;
+use crate::store;
 use crate::ui::Ui;
 
 /// Addresses shown per type.
@@ -28,8 +30,22 @@ const KINDS: [(&str, u32, AddressKind); 4] = [
     ("Legacy  1...", 44, AddressKind::P2pkh),
 ];
 
-pub fn run(ui: &mut Ui) -> ! {
-    let mut session: Option<Session> = None;
+/// The key ROM's device secret, read at boot before the slot was locked. `None` on an
+/// unprovisioned unit.
+pub type DeviceSecret = Option<Zeroizing<[u8; 32]>>;
+
+/// The secret Argon2 is keyed with: `DS`, or on an unprovisioned unit a public all-zero
+/// stand-in, which leaves the passphrase as the only protection (the screens say so).
+fn ds_or_zero(ds: &DeviceSecret) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(ds.as_deref().copied().unwrap_or([0; 32]))
+}
+
+pub fn run(ui: &mut Ui, ds: DeviceSecret) -> ! {
+    let mut session: Option<Session> = if store::present() {
+        unlock(ui, &ds)
+    } else {
+        None
+    };
     loop {
         match &session {
             None => match ui.menu(
@@ -40,7 +56,7 @@ pub fn run(ui: &mut Ui) -> ! {
                 Some(0) => session = new_wallet(ui),
                 Some(1) => session = import(ui),
                 Some(2) => utils(ui),
-                Some(3) => settings(ui, &mut session),
+                Some(3) => settings(ui, &mut session, &ds),
                 Some(4) => help(ui),
                 _ => {}
             },
@@ -63,7 +79,7 @@ pub fn run(ui: &mut Ui) -> ! {
                     Some(1) => addresses(ui, s),
                     Some(2) => export_xpub(ui, s),
                     Some(3) => utils(ui),
-                    Some(4) => settings(ui, &mut session),
+                    Some(4) => settings(ui, &mut session, &ds),
                     Some(5) => help(ui),
                     Some(6) if ui.ask("Logout", "forget this wallet?", "enter: yes  bksp: no") => {
                         session = None; // zeroizes
@@ -106,11 +122,11 @@ fn new_wallet(ui: &mut Ui) -> Option<Session> {
             }
             continue;
         }
-        if ui.ask("Written down?", "they are not stored:", "lost at reset") {
+        if ui.ask("Written down?", "the words are the", "only backup") {
             break;
         }
     }
-    start(ui, mnemonic)
+    start(ui, mnemonic, "not stored: Settings")
 }
 
 /// The words, numbered, a page at a time. Never sent to the UART.
@@ -149,7 +165,7 @@ fn import(ui: &mut Ui) -> Option<Session> {
     picked.iter_mut().for_each(|w| *w = "");
     picked.clear();
     match parsed {
-        Ok(m) => start(ui, m),
+        Ok(m) => start(ui, m, "not stored: Settings"),
         Err(_) => {
             ui.ask("Not valid", "checksum does not match", "check the words");
             None
@@ -157,17 +173,13 @@ fn import(ui: &mut Ui) -> Option<Session> {
     }
 }
 
-fn start(ui: &mut Ui, mnemonic: Mnemonic) -> Option<Session> {
+fn start(ui: &mut Ui, mnemonic: Mnemonic, note: &str) -> Option<Session> {
     ui.notice("Wallet", "deriving keys", "");
     match Session::new(mnemonic) {
         Ok(s) => {
             let fp = hex(&s.fingerprint());
             let _ = writeln!(ui.out, "wallet ready, fingerprint {fp}");
-            ui.ask(
-                "Wallet ready",
-                &format!("fingerprint {fp}"),
-                "this session only",
-            );
+            ui.ask("Wallet ready", &format!("fingerprint {fp}"), note);
             Some(s)
         }
         Err(e) => {
@@ -260,16 +272,23 @@ fn utils(ui: &mut Ui) {
     }
 }
 
-fn settings(ui: &mut Ui, session: &mut Option<Session>) {
+fn settings(ui: &mut Ui, session: &mut Option<Session>, ds: &DeviceSecret) {
     loop {
-        let items: &[&str] = if session.is_some() {
-            &["About", "View seed words"]
-        } else {
-            &["About"]
+        let stored = store::present();
+        let mut items: Vec<&str> = alloc::vec!["About"];
+        if session.is_some() {
+            items.push("View seed words");
+            items.push("Store seed");
+        }
+        if stored {
+            items.push("Erase stored seed");
+        }
+        let Some(i) = ui.menu("Settings", "", &items) else {
+            return;
         };
-        match ui.menu("Settings", "", items) {
-            Some(0) => about(ui),
-            Some(1) => {
+        match items[i] {
+            "About" => about(ui, ds),
+            "View seed words" => {
                 if let Some(s) = session.as_ref()
                     && ui.ask("Danger", "show the seed words?", "enter: show")
                 {
@@ -282,12 +301,131 @@ fn settings(ui: &mut Ui, session: &mut Option<Session>) {
                     lines.iter_mut().for_each(Zeroize::zeroize);
                 }
             }
-            _ => return,
+            "Store seed" => {
+                if let Some(s) = session.as_ref() {
+                    store_seed(ui, s, ds, stored);
+                }
+            }
+            "Erase stored seed"
+                if ui.ask("Erase?", "stored seed goes;", "words needed after")
+                    && ui.ask("Really erase?", "this can't be undone", "enter: erase") =>
+            {
+                let r = store::erase();
+                let _ = writeln!(ui.out, "stored seed erase: {r:?}");
+                match r {
+                    Ok(()) => ui.ask("Erased", "nothing stored now", ""),
+                    Err(e) => ui.ask("Failed", e, ""),
+                };
+            }
+            _ => {}
         }
     }
 }
 
-fn about(ui: &mut Ui) {
+/// Asks for the passphrase until the stored seed opens, or the owner skips.
+fn unlock(ui: &mut Ui, ds: &DeviceSecret) -> Option<Session> {
+    let key = ds_or_zero(ds);
+    loop {
+        let Some(pass) = ui.passphrase("Unlock", "passphrase:") else {
+            if ui.ask("Skip unlock?", "the seed stays", "stored. enter: skip") {
+                return None;
+            }
+            continue;
+        };
+        ui.notice("Unlock", "checking", "");
+        let t0 = crate::timer::now_ms();
+        let opened = store::open(pass.as_bytes(), &key);
+        drop(pass);
+        let ms = crate::timer::now_ms() - t0;
+        match opened {
+            Ok(c) => {
+                let _ = writeln!(ui.out, "unlock: ok in {ms} ms");
+                let m = crate::keywork::run(|kw| Mnemonic::from_entropy(c.entropy(), kw));
+                drop(c);
+                match m {
+                    Ok(m) => return start(ui, m, "unlocked from flash"),
+                    Err(_) => {
+                        ui.ask("Failed", "stored seed unusable", "");
+                        return None;
+                    }
+                }
+            }
+            Err(catcard_sealed::Error::WrongPassphrase) => {
+                let _ = writeln!(ui.out, "unlock: wrong passphrase ({ms} ms)");
+                ui.ask("Wrong", "passphrase", "enter: try again");
+            }
+            Err(e) => {
+                let _ = writeln!(ui.out, "unlock: {e}");
+                ui.ask("Can't unlock", &format!("{e}"), "");
+                return None;
+            }
+        }
+    }
+}
+
+fn store_seed(ui: &mut Ui, s: &Session, ds: &DeviceSecret, stored: bool) {
+    if stored && !ui.ask("Replace?", "a seed is stored;", "enter: replace it") {
+        return;
+    }
+    if ds.is_none()
+        && !ui.ask(
+            "Unprovisioned",
+            "only the passphrase",
+            "protects it. enter: ok",
+        )
+    {
+        return;
+    }
+    let Some(first) = ui.passphrase("Store seed", "choose a passphrase") else {
+        return;
+    };
+    if first.is_empty() {
+        ui.ask("Refused", "the passphrase", "can't be empty");
+        return;
+    }
+    let Some(again) = ui.passphrase("Store seed", "type it again") else {
+        return;
+    };
+    if *first != *again {
+        ui.ask("Mismatch", "the two passphrases", "differ: not stored");
+        return;
+    }
+    drop(again);
+    let contents = match catcard_sealed::Contents::bip39(s.entropy()) {
+        Ok(c) => c,
+        Err(_) => {
+            ui.ask("Failed", "can't store this seed", "");
+            return;
+        }
+    };
+    let key = ds_or_zero(ds);
+    ui.notice("Store seed", "sealing and writing", "");
+    let t0 = crate::timer::now_ms();
+    if let Err(e) = store::save(&contents, first.as_bytes(), &key) {
+        let _ = writeln!(ui.out, "store: {e}");
+        ui.ask("Failed", e, "nothing changed?");
+        return;
+    }
+    let t1 = crate::timer::now_ms();
+    // Read it back the way unlock will: from flash, through Argon2.
+    ui.notice("Store seed", "checking", "");
+    let ok = matches!(store::open(first.as_bytes(), &key), Ok(c) if c == contents);
+    let t2 = crate::timer::now_ms();
+    let _ = writeln!(
+        ui.out,
+        "store: sealed+written in {} ms, reopened in {} ms: {}",
+        t1 - t0,
+        t2 - t1,
+        if ok { "ok" } else { "MISMATCH" }
+    );
+    if ok {
+        ui.ask("Stored", "unlock at power-on", "with the passphrase");
+    } else {
+        ui.ask("Failed", "stored seed doesn't", "read back: erase it");
+    }
+}
+
+fn about(ui: &mut Ui, ds: &DeviceSecret) {
     let lines = [
         format!("CatCard {}", env!("CARGO_PKG_VERSION")),
         String::from("for Precursor pvt2"),
@@ -298,8 +436,16 @@ fn about(ui: &mut Ui) {
         format!("heap in use {} KB", crate::heap::used() / 1024),
         format!("uptime {} s", crate::timer::now_ms() / 1000),
         String::new(),
-        String::from("wallet: this session"),
-        String::from("only, nothing stored"),
+        String::from(if store::present() {
+            "seed: stored, sealed"
+        } else {
+            "seed: none stored"
+        }),
+        String::from(if ds.is_some() {
+            "key ROM: provisioned"
+        } else {
+            "key ROM: unprovisioned"
+        }),
     ];
     ui.pages("About", &lines);
 }
@@ -316,9 +462,13 @@ fn help(ui: &mut Ui) {
         "Import: type words,",
         " pick from the list",
         "",
-        "No storage yet: the",
-        "wallet is forgotten",
-        "at reset or Logout.",
+        "Settings > Store seed",
+        " keeps it in flash,",
+        " sealed under a",
+        " passphrase asked at",
+        " power-on. Otherwise",
+        " it's forgotten at",
+        " reset or Logout.",
     ];
     ui.pages("Help", &lines);
 }

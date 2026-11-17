@@ -151,10 +151,11 @@ fn linker_script() -> String {
          \x20   . = ALIGN(4);\n\
          \x20   _ebss = .;\n\
          \x20 }} > SRAM\n\
-         \x20 /* The heap: 4 MiB straight after .bss. The stack grows down from the top of\n\
-         \x20    SRAM, ~11 MiB away. */\n\
+         \x20 /* The heap: 12 MiB straight after .bss, most of it for Argon2's memory when\n\
+         \x20    a sealed seed is opened (store.rs). The stack grows down from the top of\n\
+         \x20    SRAM, with at least 1 MiB to itself. */\n\
          \x20 _heap_start = ALIGN(_ebss, 16);\n\
-         \x20 _heap_end = _heap_start + 0x400000;\n\
+         \x20 _heap_end = _heap_start + 0xC00000;\n\
          \x20 ASSERT(_heap_end <= _stack_top - 0x100000, \"heap runs into the stack\")\n\
          \x20 /DISCARD/ : {{ *(.eh_frame) *(.eh_frame_hdr) }}\n\
          }}\n"

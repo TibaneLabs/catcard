@@ -1,7 +1,6 @@
 //! The wallet for this power cycle: the mnemonic and the master key, in RAM only.
 //!
-//! Nothing here is stored. There is no PIN and no storage on this board yet (milestone 4,
-//! docs/PRECURSOR.md), so a wallet lasts until logout or reset, and the screens say so.
+//! The session itself is RAM only; storing it, sealed under a passphrase, is `store.rs`.
 //! Both halves zeroize on drop, so Logout is dropping the session.
 
 use catcard_wallet::bip32::{
@@ -69,6 +68,11 @@ impl Session {
 
     pub fn words(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.mnemonic.words()
+    }
+
+    /// The BIP-39 entropy, for sealing.
+    pub fn entropy(&self) -> &[u8] {
+        self.mnemonic.entropy()
     }
 
     /// The account key `m/purpose'/0'/0'` (mainnet, account 0), as an xpub.

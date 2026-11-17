@@ -37,5 +37,6 @@ catcard-wallet.workspace = true
 outscript.workspace = true
 catcard-entropy.workspace = true
 catcard-ui.workspace = true
+catcard-sealed.workspace = true
 heapless.workspace = true
 zeroize = { workspace = true, features = ["alloc"] }

@@ -315,6 +315,7 @@ dependencies = [
  "anyd",
  "catcard-alloc",
  "catcard-entropy",
+ "catcard-sealed",
  "catcard-ui",
  "catcard-wallet",
  "heapless",

@@ -3,7 +3,9 @@
 Design for storage on the Precursor (`docs/PRECURSOR.md`, milestone 4), chosen
 2026-11-08: **a device secret inside the encrypted gateware, mixed with the owner's
 passphrase**. Status: the bitstream rewriting it rests on is built and verified
-offline (`crates/catcard-bitstream`); nothing has been provisioned on a device yet.
+offline (`crates/catcard-bitstream`); the sealed-seed record (`crates/catcard-sealed`)
+and the firmware side (stage D below) are written; nothing has been provisioned on a
+device yet, and stage D's flash writes are untested on hardware.
 
 ## What the hardware offers
 
@@ -91,7 +93,20 @@ Unlock at power-on:
   stops driving it.
 - **C. Gateware v0.9.14** in flash, the boot ROM's key selection unchanged.
 - **D. Firmware**: key ROM driver (read, lock), `usbdisable` at entry, Argon2id
-  unlock, the encrypted seed store, and passphrase entry.
+  unlock, the encrypted seed store, and passphrase entry. Written, except
+  `usbdisable`:
+  - `catcard-sealed`: the 160-byte record. `Argon2id(passphrase, salt, secret = DS,
+    ad = "CatCard Precursor sealed seed v1")` keys ChaCha20-Poly1305 over the BIP-39
+    entropy (and, later, `SK`); the header (format, cost, salt, nonce) is AAD; costs
+    read back from flash are bounded before Argon2 allocates.
+  - `catcard-precursor`: `keyrom.rs` reads `DS` once at boot and locks slots
+    0x00..0x08 and 0x28..0x30 for the rest of the boot; `spinor.rs` erases and
+    programs through the gateware's command port; `store.rs` keeps the record twice,
+    at 0x1D7_E000 and 0x1D7_F000 (empty in the stock layout, below the PDDB);
+    Settings > Store seed / Erase stored seed, and a passphrase prompt at power-on.
+  - On an unprovisioned unit `DS` reads zero; storing is allowed after a screen
+    saying only the passphrase protects it. Argon2id cost to be calibrated on the
+    device (`store::COST`, now t=2, 2 MiB), under the watchdog's ~2.5 s floor.
 - **E. Provisioning** (steps 1-4 above) with the Pi helper. Test BBRAM with a
   throwaway `K_fpga` first: burning BBRAM while the flash still holds the zero-key
   eFuse gateware changes nothing, so the key can be written, then the BBRAM gateware

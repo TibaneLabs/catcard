@@ -10,6 +10,7 @@ use catcard_ui::keypad::Key;
 use catcard_ui::memlcd::{self, MemLcd};
 use catcard_ui::menu::Scroll;
 use catcard_ui::widgets::{self, Layout};
+use zeroize::Zeroizing;
 
 use crate::input::Input;
 use crate::uart::Uart;
@@ -213,4 +214,38 @@ impl Ui {
             }
         }
     }
+
+    /// Types a passphrase: letters, digits, space, `!` and `?` (what the keyboard
+    /// produces without shift or SYM). Shown masked. Backspace deletes, or on an empty
+    /// field cancels (`None`); confirm takes it.
+    pub fn passphrase(&mut self, title: &str, note: &str) -> Option<Zeroizing<String>> {
+        // Full capacity up front: a growing String would leave copies of the prefix in
+        // freed heap blocks that Zeroizing never sees.
+        let mut text = Zeroizing::new(String::with_capacity(MAX_PASSPHRASE));
+        loop {
+            let mut line = String::from("> ");
+            for _ in 0..text.len().min(16) {
+                line.push('*');
+            }
+            if text.len() > 16 {
+                let _ = write!(line, " +{}", text.len() - 16);
+            }
+            line.push('_');
+            widgets::message(&mut self.frame, &self.layout, title, note, &line);
+            self.show(title);
+            match self.input.press() {
+                Key::Char(c) if text.len() < MAX_PASSPHRASE => text.push(c as char),
+                Key::Digit(d) if text.len() < MAX_PASSPHRASE => text.push((b'0' + d) as char),
+                Key::Cancel if text.is_empty() => return None,
+                Key::Cancel => {
+                    text.pop();
+                }
+                Key::Confirm => return Some(text),
+                _ => {}
+            }
+        }
+    }
 }
+
+/// Longest passphrase accepted.
+pub const MAX_PASSPHRASE: usize = 64;

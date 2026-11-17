@@ -45,7 +45,11 @@ mod session;
 #[cfg(target_arch = "riscv32")]
 mod sign;
 #[cfg(target_arch = "riscv32")]
+mod spinor;
+#[cfg(target_arch = "riscv32")]
 mod start;
+#[cfg(target_arch = "riscv32")]
+mod store;
 #[cfg(target_arch = "riscv32")]
 mod timer;
 #[cfg(target_arch = "riscv32")]
@@ -83,6 +87,23 @@ extern "C" fn rust_main() -> ! {
     );
     let _ = writeln!(out, "uptime at entry: {} ms", timer::now_ms());
     keyrom::report(&mut out);
+    // The device secret, once, then the secret slots are locked for the rest of this boot.
+    let ds = keyrom::device_secret();
+    keyrom::lock_secrets();
+    let _ = writeln!(
+        out,
+        "keyrom device secret    : {}, slots now {}",
+        if ds.is_some() {
+            "present"
+        } else {
+            "none (unprovisioned)"
+        },
+        if keyrom::is_locked(keyrom::DEVICE_SECRET) {
+            "locked"
+        } else {
+            "NOT LOCKED"
+        }
+    );
 
     heap::init();
     let mut ui = ui::Ui::new(out);
@@ -92,5 +113,5 @@ extern "C" fn rust_main() -> ! {
     catcard_ui::widgets::info(&mut ui.frame, &ui.layout, "Entropy", &lines);
     ui.show("entropy");
     timer::delay_ms(2000);
-    app::run(&mut ui)
+    app::run(&mut ui, ds)
 }
