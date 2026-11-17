@@ -10,7 +10,7 @@
 
 use crate::cbor::{self, Key, Reader, Writer};
 use crate::ctap2::{
-    Env, Note, R, c, descriptor, id_nonce, status, user_entity, write_cose_es256, write_user,
+    Env, Note, R, c, descriptor, id_nonce, status, user_entity, write_cose, write_user,
 };
 use crate::passkeys::Record;
 use crate::pin::{Cursor, NEXT_MS, Session, check_protocol, perm};
@@ -231,7 +231,10 @@ fn find<E: Env>(env: &mut E, id: &[u8]) -> R<(usize, Record)> {
     })?;
     let (i, rec) = hit.ok_or(status::NO_CREDENTIALS)?;
     let ours = env
-        .with_master(|m, kw| m.owns(&rec.rp_id_hash, id, kw).is_some())
+        .with_master(|m, kw| {
+            m.owns(&rec.rp_id_hash, id, kw)
+                .is_some_and(|(a, _)| a == rec.alg)
+        })
         .ok_or(status::OPERATION_DENIED)?;
     if !ours {
         return Err(status::NO_CREDENTIALS);
@@ -264,9 +267,9 @@ fn write_credential<E: Env>(
 ) -> R<usize> {
     let (id, public) = env
         .with_master(|m, kw| {
-            let id = m.credential_id(&rec.rp_id_hash, &rec.nonce, kw);
-            let key = m.signing_key(&rec.rp_id_hash, &rec.nonce, kw)?;
-            Some((id, key.public_sec1(kw)))
+            let id = m.credential_id(rec.alg, &rec.rp_id_hash, &rec.nonce, kw);
+            let key = m.signing_key(rec.alg, &rec.rp_id_hash, &rec.nonce, kw)?;
+            Some((id, key.public(kw)))
         })
         .ok_or(status::OPERATION_DENIED)?
         .ok_or(status::OTHER)?;
@@ -280,7 +283,7 @@ fn write_credential<E: Env>(
         .text("type")
         .text("public-key")
         .uint(0x08);
-    write_cose_es256(&mut w, &public);
+    write_cose(&mut w, &public);
     if let Some(t) = total {
         w.uint(0x09).uint(t as u64);
     }

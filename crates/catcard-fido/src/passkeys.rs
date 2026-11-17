@@ -18,6 +18,7 @@
 //! | user.id | 1 + 64 | WebAuthn L2 §5.4.3: at most 64 bytes [C] |
 //! | user.name | 1 + 64 | cut at a character boundary |
 //! | user.displayName | 1 + 64 | cut at a character boundary |
+//! | algorithm | 1 | the credential id's version byte: 0x01 ES256, 0x02 EdDSA ([`crate::keys::Alg`]) |
 //!
 //! [`REC_LEN`] bytes per passkey, at most [`CAPACITY`] per wallet. A restored seed plus
 //! this file recovers every passkey; a restored seed alone recovers every *login*, since
@@ -33,8 +34,12 @@
 //! ct  = AES-256-CTR(enc key, iv, plaintext)
 //! tag = HMAC-SHA-256(mac key, "CPK1" ‖ iv ‖ ct), checked in constant time before
 //!       anything is decrypted
-//! plaintext = version 1 ‖ count ‖ next order (u32 LE) ‖ 2 zero bytes ‖ records
+//! plaintext = version 2 ‖ count ‖ next order (u32 LE) ‖ 2 zero bytes ‖ records
 //! ```
+//!
+//! **Version 1** files, written before EdDSA, have records one byte shorter: no algorithm
+//! byte, every passkey ES256. [`Passkeys::open`] still reads them, widening the records in
+//! place, and the next write of the file is version 2. Nothing writes version 1.
 //!
 //! CTR and HMAC rather than GCM because both are already in the image (the settings slots
 //! are AES-256-CTR, every credential id is an HMAC): GCM's GHASH would be two more
@@ -48,7 +53,7 @@ use purecrypto::ct::ConstantTimeEq;
 use purecrypto::hash::HmacSha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::keys::NONCE_LEN;
+use crate::keys::{Alg, NONCE_LEN};
 
 /// Passkeys per wallet. 50 × [`REC_LEN`] is 14 KB of plaintext, which fits one heap
 /// block on every board with the request's own 2 KB beside it.
@@ -68,15 +73,19 @@ const OFF_RP: usize = OFF_ORDER + 4;
 const OFF_UID: usize = OFF_RP + 1 + RP_MAX;
 const OFF_NAME: usize = OFF_UID + 1 + USER_ID_MAX;
 const OFF_DISP: usize = OFF_NAME + 1 + NAME_MAX;
+const OFF_ALG: usize = OFF_DISP + 1 + NAME_MAX;
 /// One stored passkey.
-pub const REC_LEN: usize = OFF_DISP + 1 + NAME_MAX;
+pub const REC_LEN: usize = OFF_ALG + 1;
+/// One stored passkey in a version 1 file: no algorithm byte.
+const REC_LEN_V1: usize = OFF_ALG;
 
 /// The plaintext's header: version, count, next order, padding.
 pub const PLAIN_HEAD: usize = 8;
 /// The sealed file's header: magic, IV, tag.
 pub const FILE_HEAD: usize = 4 + 16 + 32;
 const MAGIC: &[u8; 4] = b"CPK1";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
+const VERSION_V1: u8 = 1;
 
 /// A buffer that holds a file of `records` passkeys, sealed or open.
 pub const fn file_len(records: usize) -> usize {
@@ -85,6 +94,27 @@ pub const fn file_len(records: usize) -> usize {
 
 /// The largest file there can be.
 pub const MAX_FILE: usize = file_len(CAPACITY);
+
+/// The buffer to open a stored file of `stored` bytes in (`None`: no file yet) with room
+/// for one more passkey, at most [`MAX_FILE`].
+///
+/// The length alone does not say which version the file is, so the count is taken at the
+/// shorter, version 1 stride. For a version 2 file that is still exact: `n` records of
+/// [`REC_LEN`] bytes are `n` at the shorter stride too while `n` is under `REC_LEN_V1`
+/// (280), and [`CAPACITY`] is 50.
+pub const fn buffer_for(stored: Option<usize>) -> usize {
+    let count = match stored {
+        Some(n) if n > file_len(0) => (n - file_len(0)) / REC_LEN_V1,
+        _ => 0,
+    };
+    let want = if count + 1 < CAPACITY {
+        count + 1
+    } else {
+        CAPACITY
+    };
+    file_len(want)
+}
+const _: () = assert!(CAPACITY < REC_LEN_V1);
 
 /// A short field: bytes and how many are used.
 #[derive(Clone, PartialEq, Eq, Zeroize)]
@@ -157,6 +187,9 @@ impl<const N: usize> Field<N> {
 /// One passkey.
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct Record {
+    /// Public: the credential id carries it in the clear.
+    #[zeroize(skip)]
+    pub alg: Alg,
     pub nonce: [u8; NONCE_LEN],
     pub rp_id_hash: [u8; 32],
     pub order: u32,
@@ -194,6 +227,7 @@ pub fn truncate_rp_id(rp_id: &str) -> Field<RP_MAX> {
 impl Record {
     /// A new passkey for `rp_id`. `None` if `user_id` is longer than WebAuthn allows.
     pub fn new(
+        alg: Alg,
         nonce: &[u8; NONCE_LEN],
         rp_id: &str,
         rp_id_hash: &[u8; 32],
@@ -202,6 +236,7 @@ impl Record {
         display_name: Option<&str>,
     ) -> Option<Self> {
         Some(Self {
+            alg,
             nonce: *nonce,
             rp_id_hash: *rp_id_hash,
             order: 0,
@@ -226,18 +261,20 @@ impl Record {
         self.rp_id.put(&mut out[OFF_RP..OFF_UID]);
         self.user_id.put(&mut out[OFF_UID..OFF_NAME]);
         self.name.put(&mut out[OFF_NAME..OFF_DISP]);
-        self.display_name.put(&mut out[OFF_DISP..REC_LEN]);
+        self.display_name.put(&mut out[OFF_DISP..OFF_ALG]);
+        out[OFF_ALG] = self.alg.version();
     }
 
     fn read(b: &[u8]) -> Option<Self> {
         Some(Self {
+            alg: Alg::from_version(b[OFF_ALG])?,
             nonce: b[OFF_NONCE..OFF_RP_HASH].try_into().ok()?,
             rp_id_hash: b[OFF_RP_HASH..OFF_ORDER].try_into().ok()?,
             order: u32::from_le_bytes(b[OFF_ORDER..OFF_RP].try_into().ok()?),
             rp_id: Field::get(&b[OFF_RP..OFF_UID])?,
             user_id: Field::get(&b[OFF_UID..OFF_NAME])?,
             name: Field::get(&b[OFF_NAME..OFF_DISP])?,
-            display_name: Field::get(&b[OFF_DISP..REC_LEN])?,
+            display_name: Field::get(&b[OFF_DISP..OFF_ALG])?,
         })
     }
 }
@@ -270,7 +307,9 @@ impl<'a> Passkeys<'a> {
         Ok(Self { plain })
     }
 
-    /// Open the `len`-byte sealed file at the start of `buf`, in place.
+    /// Open the `len`-byte sealed file at the start of `buf`, in place. A version 1 file
+    /// is widened to version 2 as it opens, which needs `buf` to hold
+    /// `file_len(count)` -- as [`buffer_for`] sizes it.
     pub fn open(key: &PasskeyKey, buf: &'a mut [u8], len: usize) -> Result<Self, Error> {
         if len < file_len(0) || len > buf.len() || &buf[..4] != MAGIC {
             return Err(Error::Unreadable);
@@ -285,9 +324,28 @@ impl<'a> Passkeys<'a> {
         Ctr::new(Aes256::new(&key.enc), &iv).apply_keystream(&mut buf[FILE_HEAD..len]);
         let plain = &mut buf[FILE_HEAD..];
         let n = plain[1] as usize;
-        if plain[0] != VERSION || n > CAPACITY || len != file_len(n) {
+        let v1_len = FILE_HEAD + PLAIN_HEAD + n * REC_LEN_V1;
+        let ok = n <= CAPACITY
+            && match plain[0] {
+                VERSION => len == file_len(n),
+                VERSION_V1 => len == v1_len && buf.len() >= file_len(n),
+                _ => false,
+            };
+        let plain = &mut buf[FILE_HEAD..];
+        if !ok {
             plain.zeroize();
             return Err(Error::Unreadable);
+        }
+        if plain[0] == VERSION_V1 {
+            // Widen from the last record down, so none is overwritten before it moves:
+            // record i goes from i * 280 to i * 281, never below where it was.
+            for i in (0..n).rev() {
+                let from = PLAIN_HEAD + i * REC_LEN_V1;
+                let to = PLAIN_HEAD + i * REC_LEN;
+                plain.copy_within(from..from + REC_LEN_V1, to);
+                plain[to + OFF_ALG] = Alg::Es256.version();
+            }
+            plain[0] = VERSION;
         }
         let p = Self { plain };
         for i in 0..n {
@@ -502,7 +560,16 @@ mod tests {
 
     fn rec(rp: &str, user: &[u8], name: &str) -> Record {
         let h: [u8; 32] = purecrypto::hash::Sha256::digest(rp.as_bytes());
-        Record::new(&[user[0]; 16], rp, &h, user, Some(name), Some("Display")).unwrap()
+        Record::new(
+            Alg::Es256,
+            &[user[0]; 16],
+            rp,
+            &h,
+            user,
+            Some(name),
+            Some("Display"),
+        )
+        .unwrap()
     }
 
     use purecrypto::hash::Digest as _;
@@ -557,6 +624,99 @@ mod tests {
         assert!(Passkeys::open(&key, &mut copy, len - REC_LEN).is_err());
     }
 
+    /// A version 1 file -- written before EdDSA, records one byte shorter -- opens with
+    /// every passkey ES256, and is version 2 once written back. Built here byte by byte
+    /// as version 1 laid it out, so the test does not lean on the code it checks.
+    #[test]
+    fn a_version_1_file_opens_as_es256_and_is_written_back_as_version_2() {
+        let key = PasskeyKey::test(3);
+        let recs = [
+            rec("example.com", b"u1", "alice"),
+            rec("example.com", b"u2", "bob"),
+            rec("other.org", b"u3", "carol"),
+        ];
+        let n = recs.len();
+        let v1_len = FILE_HEAD + PLAIN_HEAD + n * REC_LEN_V1;
+        let mut buf = vec![0u8; buffer_for(Some(v1_len))];
+        assert!(buf.len() >= file_len(n + 1), "room to widen, and one more");
+        {
+            let plain = &mut buf[FILE_HEAD..];
+            plain[0] = 1;
+            plain[1] = n as u8;
+            plain[2..6].copy_from_slice(&(n as u32).to_le_bytes());
+            for (i, r) in recs.iter().enumerate() {
+                let mut r = r.clone();
+                r.order = i as u32;
+                let mut slot = [0u8; REC_LEN];
+                r.write(&mut slot);
+                let at = PLAIN_HEAD + i * REC_LEN_V1;
+                plain[at..at + REC_LEN_V1].copy_from_slice(&slot[..REC_LEN_V1]);
+            }
+        }
+        // Sealed as version 1 was: the same magic, CTR and tag over its length.
+        buf[..4].copy_from_slice(MAGIC);
+        buf[4..20].copy_from_slice(&[7; 16]);
+        Ctr::new(Aes256::new(&key.enc), &[7; 16]).apply_keystream(&mut buf[FILE_HEAD..v1_len]);
+        let tag = file_tag(&key, &buf[..v1_len]);
+        buf[20..52].copy_from_slice(&tag);
+
+        // A buffer with no room to widen is refused rather than overrun.
+        let mut tight = buf[..v1_len].to_vec();
+        assert_eq!(
+            Passkeys::open(&key, &mut tight, v1_len).err(),
+            Some(Error::Unreadable)
+        );
+
+        let mut p = Passkeys::open(&key, &mut buf, v1_len).unwrap();
+        assert_eq!(p.len(), n);
+        for (i, want) in recs.iter().enumerate() {
+            let got = p.get(i).unwrap();
+            assert_eq!(got.alg, Alg::Es256);
+            assert_eq!(got.nonce, want.nonce);
+            assert_eq!(got.user_id.as_bytes(), want.user_id.as_bytes());
+            assert_eq!(got.display_name.as_str(), "Display");
+            assert_eq!(got.order, i as u32);
+        }
+        let mut ed = rec("ssh:", b"u4", "dave");
+        ed.alg = Alg::EdDsa;
+        p.add(&ed).unwrap();
+        let len = seal_file(&mut buf, &key, &[8; 16]);
+        assert_eq!(len, file_len(n + 1));
+        let p = Passkeys::open(&key, &mut buf, len).unwrap();
+        assert_eq!(p.plain[0], VERSION);
+        assert_eq!(p.get(n).unwrap().alg, Alg::EdDsa);
+        assert_eq!(p.get(0).unwrap().alg, Alg::Es256);
+        assert_eq!(p.get(n).unwrap().order, n as u32);
+    }
+
+    /// The buffer size for a stored file counts its records right in either version.
+    #[test]
+    fn buffer_for_counts_both_versions() {
+        assert_eq!(buffer_for(None), file_len(1));
+        for n in 0..=CAPACITY {
+            let want = file_len((n + 1).min(CAPACITY));
+            assert_eq!(buffer_for(Some(file_len(n))), want, "v2, {n}");
+            let v1 = FILE_HEAD + PLAIN_HEAD + n * REC_LEN_V1;
+            assert_eq!(buffer_for(Some(v1)), want, "v1, {n}");
+        }
+    }
+
+    /// An algorithm byte that names no algorithm makes the file unreadable, as any other
+    /// bad field does.
+    #[test]
+    fn an_unknown_algorithm_byte_is_unreadable() {
+        let key = PasskeyKey::test(3);
+        let mut buf = vec![0u8; MAX_FILE];
+        let mut p = Passkeys::empty(&mut buf).unwrap();
+        p.add(&rec("a.com", b"x", "n")).unwrap();
+        p.slot_mut(0)[OFF_ALG] = 0x09;
+        let len = seal_file(&mut buf, &key, &[1; 16]);
+        assert_eq!(
+            Passkeys::open(&key, &mut buf, len).err(),
+            Some(Error::Unreadable)
+        );
+    }
+
     #[test]
     fn same_site_and_account_replaces_and_the_store_fills() {
         let mut buf = vec![0u8; MAX_FILE];
@@ -607,8 +767,8 @@ mod tests {
         }
         // A name is cut at a character boundary; a user id that is too long is refused.
         let long = "é".repeat(40);
-        let r = Record::new(&[0; 16], "a", &[0; 32], b"u", Some(&long), None).unwrap();
+        let r = Record::new(Alg::Es256, &[0; 16], "a", &[0; 32], b"u", Some(&long), None).unwrap();
         assert_eq!(r.name.as_str(), "é".repeat(32));
-        assert!(Record::new(&[0; 16], "a", &[0; 32], &[0; 65], None, None).is_none());
+        assert!(Record::new(Alg::Es256, &[0; 16], "a", &[0; 32], &[0; 65], None, None).is_none());
     }
 }

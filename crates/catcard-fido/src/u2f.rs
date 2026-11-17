@@ -39,7 +39,7 @@ use catcard_wallet::KeyWork;
 
 use crate::ctap2::Env;
 use crate::der;
-use crate::keys::{CRED_ID_LEN, NONCE_LEN};
+use crate::keys::{self, Alg, CRED_ID_LEN, NONCE_LEN, PublicKey};
 
 /// Status words. Source: U2F Raw Message Formats §3.3 [C]
 pub mod sw {
@@ -213,20 +213,23 @@ fn register<E: Env>(data: &[u8], out: &mut [u8], env: &mut E) -> Result<usize, u
         return Err(sw::CONDITIONS_NOT_SATISFIED);
     }
     env.with_master(|m, kw: &KeyWork| {
-        let kh = m.credential_id(app, &nonce, kw);
+        // U2F is P-256 by definition (Raw Message Formats §4.3).
+        let kh = m.credential_id(Alg::Es256, app, &nonce, kw);
         let key = m
-            .signing_key(app, &nonce, kw)
+            .signing_key(Alg::Es256, app, &nonce, kw)
             .ok_or(sw::CONDITIONS_NOT_SATISFIED)?;
-        let public = key.public_sec1(kw);
+        let PublicKey::Es256(public) = key.public(kw) else {
+            return Err(sw::CONDITIONS_NOT_SATISFIED);
+        };
         let tbs = der::tbs(&public, &serial);
-        let (r, s) = key.sign(&[&tbs], kw).ok_or(sw::CONDITIONS_NOT_SATISFIED)?;
-        let mut cert_sig = [0u8; der::SIG_MAX];
-        let cn = der::signature(&r, &s, &mut cert_sig);
-        let (r, s) = key
-            .sign(&[&[0u8], app, challenge, &kh, &public], kw)
+        let mut cert_sig = [0u8; keys::SIG_MAX];
+        let cn = key
+            .sign(&[&tbs], &mut cert_sig, kw)
             .ok_or(sw::CONDITIONS_NOT_SATISFIED)?;
-        let mut sig = [0u8; der::SIG_MAX];
-        let sn = der::signature(&r, &s, &mut sig);
+        let mut sig = [0u8; keys::SIG_MAX];
+        let sn = key
+            .sign(&[&[0u8], app, challenge, &kh, &public], &mut sig, kw)
+            .ok_or(sw::CONDITIONS_NOT_SATISFIED)?;
 
         let mut at = 0;
         out[at] = 0x05;
@@ -252,9 +255,12 @@ fn authenticate<E: Env>(p1: u8, data: &[u8], out: &mut [u8], env: &mut E) -> Res
     let challenge = arr32(&data[..32]);
     let app = arr32(&data[32..64]);
     let kh = &data[65..];
+    // An EdDSA credential is this wallet's, but not one U2F can sign with: to U2F it is
+    // a key handle of some other token's.
     let nonce = env
         .with_master(|m, kw| m.owns(app, kh, kw))
         .ok_or(sw::CONDITIONS_NOT_SATISFIED)?
+        .and_then(|(alg, n)| (alg == Alg::Es256).then_some(n))
         .ok_or(sw::WRONG_DATA)?;
     let up = match p1 {
         // "If the key handle was created by this U2F token, the token MUST respond with
@@ -272,13 +278,12 @@ fn authenticate<E: Env>(p1: u8, data: &[u8], out: &mut [u8], env: &mut E) -> Res
     let counter = 0u32.to_be_bytes();
     env.with_master(|m, kw| {
         let key = m
-            .signing_key(app, &nonce, kw)
+            .signing_key(Alg::Es256, app, &nonce, kw)
             .ok_or(sw::CONDITIONS_NOT_SATISFIED)?;
-        let (r, s) = key
-            .sign(&[app, &flags, &counter, challenge], kw)
+        let mut sig = [0u8; keys::SIG_MAX];
+        let sn = key
+            .sign(&[app, &flags, &counter, challenge], &mut sig, kw)
             .ok_or(sw::CONDITIONS_NOT_SATISFIED)?;
-        let mut sig = [0u8; der::SIG_MAX];
-        let sn = der::signature(&r, &s, &mut sig);
         out[0] = flags[0];
         out[1..5].copy_from_slice(&counter);
         out[5..5 + sn].copy_from_slice(&sig[..sn]);
@@ -535,5 +540,29 @@ mod tests {
             call(&mut env, &ext(ins::AUTHENTICATE, 0x07, &a)),
             [0x6A, 0x80]
         );
+    }
+
+    /// U2F signs only P-256: an EdDSA credential is this wallet's, but to U2F it is some
+    /// other token's key handle -- "wrong data", for the check and the sign alike.
+    #[test]
+    fn an_eddsa_credential_is_not_a_u2f_key_handle() {
+        let mut env = Fake::new(0);
+        let rp = "example.com";
+        let app = Sha256::digest(rp.as_bytes());
+        let mut out = vec![0u8; 1024];
+        let mc = ctap2::tests::make_credential_req(rp, &[ctap2::EDDSA], &[], None);
+        let n = ctap2::handle(&mc, &mut out, &mut crate::pin::Session::new(), &mut env);
+        let (id, ..) = ctap2::tests::registered_eddsa(&out[..n]);
+        let mut a = [0u8; 32].to_vec();
+        a.extend_from_slice(&app);
+        a.push(id.len() as u8);
+        a.extend_from_slice(&id);
+        for p1 in [0x07, 0x03, 0x08] {
+            assert_eq!(
+                call(&mut env, &ext(ins::AUTHENTICATE, p1, &a)),
+                [0x6A, 0x80],
+                "p1 {p1:#04x}"
+            );
+        }
     }
 }

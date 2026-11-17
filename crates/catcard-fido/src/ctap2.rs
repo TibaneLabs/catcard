@@ -5,7 +5,7 @@
 //!
 //! | command | here |
 //! |---|---|
-//! | `authenticatorMakeCredential` (0x01) | ES256 only, `packed` self-attestation; `rk` stores a passkey |
+//! | `authenticatorMakeCredential` (0x01) | ES256 or EdDSA (Ed25519), `packed` self-attestation; `rk` stores a passkey |
 //! | `authenticatorGetAssertion` (0x02) | an `allowList`, or none to find this wallet's passkeys for the site |
 //! | `authenticatorGetInfo` (0x04) | [`get_info`], from the device's [`Caps`] |
 //! | `authenticatorClientPIN` (0x06) | PIN/UV auth protocols 2 and 1, see [`crate::pin`] |
@@ -40,7 +40,9 @@
 //!
 //! # What is refused, and with what
 //!
-//! - an algorithm list without ES256 (`alg` -7): `CTAP2_ERR_UNSUPPORTED_ALGORITHM`;
+//! - an algorithm list with neither ES256 (`alg` -7) nor EdDSA (-8):
+//!   `CTAP2_ERR_UNSUPPORTED_ALGORITHM`. With both, the platform's order decides (§6.1.2
+//!   step 3: "the first element ... that the authenticator supports");
 //! - `uv: true`: `CTAP2_ERR_INVALID_OPTION` -- no built-in user verification;
 //! - `up: false` on MakeCredential: `CTAP2_ERR_INVALID_OPTION`;
 //! - `rk: true` where the board keeps no passkeys (the mk3): `CTAP2_ERR_UNSUPPORTED_OPTION`;
@@ -53,8 +55,7 @@ use catcard_wallet::KeyWork;
 use purecrypto::hash::{Digest, Sha256};
 
 use crate::cbor::{self, Key, Reader, Writer};
-use crate::der;
-use crate::keys::{CRED_ID_LEN, CRED_VERSION, Master, NONCE_LEN};
+use crate::keys::{self, Alg, CRED_ID_LEN, Master, NONCE_LEN, PublicKey};
 use crate::passkeys::{self, Passkeys, Record};
 use crate::pin::{self, Cursor, PinRecord, Session, perm};
 
@@ -116,7 +117,9 @@ pub mod status {
 
 /// COSE algorithm ES256: ECDSA over P-256 with SHA-256.
 /// Source: RFC 9053 §2.1; WebAuthn L2 §5.8.5 [C]
-pub const ES256: i64 = -7;
+pub const ES256: i64 = Alg::Es256.cose();
+/// COSE algorithm EdDSA, here always Ed25519. Source: RFC 9053 §2.2 [C]
+pub const EDDSA: i64 = Alg::EdDsa.cose();
 
 /// Most credentials a platform should put in one `allowList` / `excludeList`, and the
 /// longest credential id worth sending: ours are [`CRED_ID_LEN`], so anything longer
@@ -418,14 +421,15 @@ pub fn get_info(out: &mut [u8], caps: &Caps) -> usize {
     w.uint(0x08).uint(MAX_CRED_ID_LEN);
     // 0x09 transports
     w.uint(0x09).array(1).text("usb");
-    // 0x0A algorithms: [{"alg": -7, "type": "public-key"}]
-    w.uint(0x0A)
-        .array(1)
-        .map(2)
-        .text("alg")
-        .int(ES256)
-        .text("type")
-        .text("public-key");
+    // 0x0A algorithms: [{"alg": -7, "type": "public-key"}, {"alg": -8, ...}]
+    w.uint(0x0A).array(Alg::ALL.len());
+    for a in Alg::ALL {
+        w.map(2)
+            .text("alg")
+            .int(a.cose())
+            .text("type")
+            .text("public-key");
+    }
     // 0x0D minPINLength: required when clientPIN is supported (§6.4).
     w.uint(0x0D).uint(pin::MIN_PIN_LEN as u64);
     // 0x14 remainingDiscoverableCredentials, when known.
@@ -606,7 +610,8 @@ struct MakeCredential<'a> {
     user_id: &'a [u8],
     user_name: Option<&'a str>,
     display_name: Option<&'a str>,
-    es256: bool,
+    /// The first algorithm in the platform's list that this device does.
+    alg: Option<Alg>,
     exclude: Descriptors<'a>,
     options: Options,
     pin_auth: Option<&'a [u8]>,
@@ -627,7 +632,7 @@ fn parse_make_credential(body: &[u8]) -> R<MakeCredential<'_>> {
         user_id: &[],
         user_name: None,
         display_name: None,
-        es256: false,
+        alg: None,
         exclude: Descriptors::default(),
         options: Options::default(),
         pin_auth: None,
@@ -675,7 +680,9 @@ fn parse_make_credential(body: &[u8]) -> R<MakeCredential<'_>> {
                     let (Some(alg), Some(ty)) = (alg, ty) else {
                         return Err(status::MISSING_PARAMETER);
                     };
-                    mc.es256 |= alg == ES256 && ty == "public-key";
+                    if mc.alg.is_none() && ty == "public-key" {
+                        mc.alg = Alg::from_cose(alg);
+                    }
                 }
                 params = Some(());
             }
@@ -735,9 +742,9 @@ fn make_credential<'a, E: Env>(
         None => None,
     };
     // Step 3.
-    if !mc.es256 {
+    let Some(alg) = mc.alg else {
         return Err(status::UNSUPPORTED_ALGORITHM);
-    }
+    };
     // Step 5: options. With a pinUvAuthParam, "uv" is treated as false.
     let caps = env.caps();
     if mc.pin_auth.is_none() && mc.options.uv == Some(true) {
@@ -823,17 +830,18 @@ fn make_credential<'a, E: Env>(
     let flags = flags::UP | flags::AT | if uv { flags::UV } else { 0 };
     let n = env
         .with_master(|m, kw| {
-            let id = m.credential_id(&rp_id_hash, &nonce, kw);
+            let id = m.credential_id(alg, &rp_id_hash, &nonce, kw);
             let key = m
-                .signing_key(&rp_id_hash, &nonce, kw)
+                .signing_key(alg, &rp_id_hash, &nonce, kw)
                 .ok_or(status::OTHER)?;
-            let public = key.public_sec1(kw);
+            let public = key.public(kw);
             let mut auth = [0u8; AUTH_DATA_MAX];
             let an = attested_auth_data(&rp_id_hash, flags, &id, &public, &mut auth)
                 .ok_or(status::OTHER)?;
-            let (r, s) = key.sign(&[&auth[..an], cdh], kw).ok_or(status::OTHER)?;
-            let mut sig = [0u8; der::SIG_MAX];
-            let sn = der::signature(&r, &s, &mut sig);
+            let mut sig = [0u8; keys::SIG_MAX];
+            let sn = key
+                .sign(&[&auth[..an], cdh], &mut sig, kw)
+                .ok_or(status::OTHER)?;
             let mut w = Writer::new(out);
             // {1: fmt, 2: authData, 3: attStmt{"alg", "sig"}}
             w.map(3)
@@ -844,7 +852,7 @@ fn make_credential<'a, E: Env>(
                 .uint(3)
                 .map(2)
                 .text("alg")
-                .int(ES256)
+                .int(alg.cose())
                 .text("sig")
                 .bytes(&sig[..sn]);
             w.finish().map_err(|_| status::OTHER)
@@ -854,6 +862,7 @@ fn make_credential<'a, E: Env>(
     // Step 17: a passkey is stored before the answer goes back, or there is no answer.
     if rk {
         let rec = Record::new(
+            alg,
             &nonce,
             mc.rp_id,
             &rp_id_hash,
@@ -871,25 +880,50 @@ fn make_credential<'a, E: Env>(
     Ok(n)
 }
 
-/// Authenticator data with attested credential data: 37 + 16 + 2 + 33 + 77.
-pub const AUTH_DATA_MAX: usize = 37 + 16 + 2 + CRED_ID_LEN + COSE_KEY_LEN;
-/// The COSE key below, which is always this long.
-pub(crate) const COSE_KEY_LEN: usize = 77;
+/// Authenticator data with attested credential data: 37 + 16 + 2 + 33 + 77, the
+/// longest COSE key being ES256's.
+pub const AUTH_DATA_MAX: usize = 37 + 16 + 2 + CRED_ID_LEN + COSE_KEY_MAX;
+/// The ES256 COSE key below, which is always this long; the EdDSA one is
+/// [`COSE_KEY_EDDSA_LEN`].
+pub(crate) const COSE_KEY_MAX: usize = 77;
+pub(crate) const COSE_KEY_EDDSA_LEN: usize = 42;
 
-/// An ES256 public key as a COSE_Key, EC2, canonical order: 1 (kty), 3 (alg), -1 (crv),
-/// -2 (x), -3 (y). Source: RFC 9052 §7, RFC 9053 §7.1.1 [C]
-pub(crate) fn write_cose_es256(w: &mut Writer<'_>, public: &[u8; 65]) {
-    w.map(5)
-        .int(1)
-        .int(2)
-        .int(3)
-        .int(ES256)
-        .int(-1)
-        .int(1)
-        .int(-2)
-        .bytes(&public[1..33])
-        .int(-3)
-        .bytes(&public[33..65]);
+// Everything EdDSA signs here must fit the buffer it is signed from.
+const _: () = assert!(AUTH_DATA_MAX + 32 <= keys::EDDSA_MSG_MAX);
+
+/// A credential public key as a COSE_Key, keys in canonical order.
+///
+/// - ES256: EC2 -- 1 (kty 2), 3 (alg -7), -1 (crv 1, P-256), -2 (x), -3 (y).
+///   Source: RFC 9052 §7, RFC 9053 §7.1.1 [C]
+/// - EdDSA: OKP -- 1 (kty 1), 3 (alg -8), -1 (crv 6, Ed25519), -2 (x, the encoded point).
+///   Source: RFC 9053 §7.2 (OKP), §2.2 (EdDSA), table 18 (Ed25519 = 6) [C]
+pub(crate) fn write_cose(w: &mut Writer<'_>, public: &PublicKey) {
+    match public {
+        PublicKey::Es256(p) => {
+            w.map(5)
+                .int(1)
+                .int(2)
+                .int(3)
+                .int(ES256)
+                .int(-1)
+                .int(1)
+                .int(-2)
+                .bytes(&p[1..33])
+                .int(-3)
+                .bytes(&p[33..65]);
+        }
+        PublicKey::EdDsa(x) => {
+            w.map(4)
+                .int(1)
+                .int(1)
+                .int(3)
+                .int(EDDSA)
+                .int(-1)
+                .int(6)
+                .int(-2)
+                .bytes(x);
+        }
+    }
 }
 
 /// `rpIdHash ‖ flags ‖ signCount ‖ aaguid ‖ credIdLen ‖ credId ‖ COSE_Key`.
@@ -905,7 +939,7 @@ fn attested_auth_data(
     rp_id_hash: &[u8; 32],
     flags: u8,
     id: &[u8; CRED_ID_LEN],
-    public: &[u8; 65],
+    public: &PublicKey,
     out: &mut [u8; AUTH_DATA_MAX],
 ) -> Option<usize> {
     out[..32].copy_from_slice(rp_id_hash);
@@ -916,9 +950,15 @@ fn attested_auth_data(
     out[55..55 + CRED_ID_LEN].copy_from_slice(id);
     let at = 55 + CRED_ID_LEN;
     let mut w = Writer::new(&mut out[at..]);
-    write_cose_es256(&mut w, public);
+    write_cose(&mut w, public);
     let n = w.finish().ok()?;
-    debug_assert_eq!(n, COSE_KEY_LEN);
+    debug_assert_eq!(
+        n,
+        match public {
+            PublicKey::Es256(_) => COSE_KEY_MAX,
+            PublicKey::EdDsa(_) => COSE_KEY_EDDSA_LEN,
+        }
+    );
     Some(at + n)
 }
 
@@ -974,8 +1014,8 @@ fn parse_get_assertion(body: &[u8]) -> R<GetAssertion<'_>> {
 /// a request, so the passkey is held by value rather than boxed (there is no allocator).
 #[allow(clippy::large_enum_variant)]
 enum Chosen<'a> {
-    /// From the allow list: its id, and the nonce inside it.
-    Listed(&'a [u8], [u8; NONCE_LEN]),
+    /// From the allow list: its id, and the algorithm and nonce inside it.
+    Listed(&'a [u8], Alg, [u8; NONCE_LEN]),
     /// A passkey, and how many the site has.
     Resident(Record, u8),
 }
@@ -1044,7 +1084,7 @@ fn get_assertion<'a, E: Env>(
             hit
         })
         .ok_or(status::OPERATION_DENIED)?
-        .map(|(id, n)| Chosen::Listed(id, n))
+        .map(|(id, (alg, n))| Chosen::Listed(id, alg, n))
     } else if caps.rk {
         let r = env.passkeys(|p| {
             let n = p.count_for(&rp_id_hash);
@@ -1076,13 +1116,13 @@ fn get_assertion<'a, E: Env>(
     };
     let flags = if up { flags::UP } else { 0 } | if uv { flags::UV } else { 0 };
     match found {
-        Chosen::Listed(id, nonce) => sign_assertion(
+        Chosen::Listed(id, alg, nonce) => sign_assertion(
             out,
             env,
             &rp_id_hash,
             ga.client_data_hash,
             flags,
-            Signed::Listed(id, &nonce),
+            Signed::Listed(id, alg, &nonce),
         ),
         Chosen::Resident(rec, total) => {
             let n = sign_assertion(
@@ -1117,7 +1157,7 @@ fn get_assertion<'a, E: Env>(
 
 /// What an assertion is signed for.
 enum Signed<'r> {
-    Listed(&'r [u8], &'r [u8; NONCE_LEN]),
+    Listed(&'r [u8], Alg, &'r [u8; NONCE_LEN]),
     /// A passkey: `names` when user verification was done and there is a choice to make
     /// (§6.2.2 step 11 "User identifiable information ... MUST NOT be returned if user
     /// verification is not done"), `total` for the first of several.
@@ -1138,26 +1178,27 @@ fn sign_assertion<E: Env>(
     what: Signed<'_>,
 ) -> R<usize> {
     env.with_master(|m, kw| {
-        let (nonce, made_id);
+        let (alg, nonce, made_id);
         let id: &[u8] = match &what {
-            Signed::Listed(id, n) => {
-                nonce = **n;
+            Signed::Listed(id, a, n) => {
+                (alg, nonce) = (*a, **n);
                 id
             }
             Signed::Resident { rec, .. } => {
-                nonce = rec.nonce;
-                made_id = m.credential_id(rp_id_hash, &nonce, kw);
+                (alg, nonce) = (rec.alg, rec.nonce);
+                made_id = m.credential_id(alg, rp_id_hash, &nonce, kw);
                 &made_id
             }
         };
-        let key = m.signing_key(rp_id_hash, &nonce, kw).ok_or(status::OTHER)?;
+        let key = m
+            .signing_key(alg, rp_id_hash, &nonce, kw)
+            .ok_or(status::OTHER)?;
         let mut auth = [0u8; 37];
         auth[..32].copy_from_slice(rp_id_hash);
         auth[32] = flags;
         // signCount 0: see `attested_auth_data`.
-        let (r, s) = key.sign(&[&auth, cdh], kw).ok_or(status::OTHER)?;
-        let mut sig = [0u8; der::SIG_MAX];
-        let sn = der::signature(&r, &s, &mut sig);
+        let mut sig = [0u8; keys::SIG_MAX];
+        let sn = key.sign(&[&auth, cdh], &mut sig, kw).ok_or(status::OTHER)?;
         let mut w = Writer::new(out);
         let (user, total) = match &what {
             Signed::Listed(..) => (None, None),
@@ -1266,7 +1307,7 @@ fn get_next_assertion<E: Env>(
 /// The nonce inside a credential id of ours, from its public layout alone -- its MAC is
 /// for [`Master::owns`] to check.
 pub(crate) fn id_nonce(id: &[u8]) -> Option<[u8; NONCE_LEN]> {
-    if id.len() != CRED_ID_LEN || id[0] != CRED_VERSION {
+    if id.len() != CRED_ID_LEN || Alg::from_version(id[0]).is_none() {
         return None;
     }
     id[1..1 + NONCE_LEN].try_into().ok()
@@ -1568,7 +1609,9 @@ pub(crate) mod tests {
 
     /// The exact bytes, so a change to what a platform is told is a deliberate one. The
     /// expected encodings are python-fido2 2.2.1's `fido2.cbor.encode` of the same maps
-    /// (an independent canonical encoder), and the strict reader accepts ours.
+    /// (an independent canonical encoder), and the strict reader accepts ours. The
+    /// `algorithms` entry (0x0A) has since grown EdDSA's map, `a2 63"alg" 27(-8) 64"type"
+    /// 6a"public-key"`, read off by hand against RFC 8949 rather than re-encoded.
     #[test]
     fn get_info_is_canonical_and_says_what_is_supported() {
         let cases = [
@@ -1585,7 +1628,8 @@ pub(crate) mod tests {
                     "69636c69656e7450696ef46e70696e557641757468546f6b656ef5",
                     "706d616b654372656455764e6f74527164f5",
                     "05190400068202010708081840098163757362",
-                    "0a81a263616c672664747970656a7075626c69632d6b6579",
+                    "0a82a263616c672664747970656a7075626c69632d6b6579",
+                    "a263616c672764747970656a7075626c69632d6b6579",
                     "0d04141832",
                 ),
             ),
@@ -1602,7 +1646,8 @@ pub(crate) mod tests {
                     "69636c69656e7450696ef56e70696e557641757468546f6b656ef5",
                     "706d616b654372656455764e6f74527164f5",
                     "05190400068202010708081840098163757362",
-                    "0a81a263616c672664747970656a7075626c69632d6b6579",
+                    "0a82a263616c672664747970656a7075626c69632d6b6579",
+                    "a263616c672764747970656a7075626c69632d6b6579",
                     "0d04",
                 ),
             ),
@@ -1624,7 +1669,7 @@ pub(crate) mod tests {
         let mut env = Fake::new(0);
         let resp = call(
             &mut env,
-            &make_credential_req("example.com", &[-8, ES256], &[], None),
+            &make_credential_req("example.com", &[ES256, EDDSA], &[], None),
         );
         let (id, public, auth, sig) = registered(&resp);
         assert_eq!(id.len(), CRED_ID_LEN);
@@ -1717,6 +1762,158 @@ pub(crate) mod tests {
         assert_eq!(resp, [status::NO_CREDENTIALS]);
     }
 
+    /// Parse an EdDSA MakeCredential response: (credential id, public key, authData, sig).
+    pub(crate) fn registered_eddsa(resp: &[u8]) -> (Vec<u8>, [u8; 32], Vec<u8>, Vec<u8>) {
+        assert_eq!(resp[0], status::OK, "status {:#04x}", resp[0]);
+        let mut r = Reader::new(&resp[1..]);
+        let mut m = r.map().unwrap();
+        assert_eq!(r.key(&mut m).unwrap(), Some(Key::Int(1)));
+        assert_eq!(r.text().unwrap(), "packed");
+        assert_eq!(r.key(&mut m).unwrap(), Some(Key::Int(2)));
+        let auth = r.bytes().unwrap().to_vec();
+        assert_eq!(r.key(&mut m).unwrap(), Some(Key::Int(3)));
+        let mut st = r.map().unwrap();
+        assert_eq!(r.key(&mut st).unwrap(), Some(Key::Text("alg")));
+        assert_eq!(r.int().unwrap(), EDDSA);
+        assert_eq!(r.key(&mut st).unwrap(), Some(Key::Text("sig")));
+        let sig = r.bytes().unwrap().to_vec();
+        assert_eq!(r.key(&mut st).unwrap(), None);
+        assert_eq!(r.key(&mut m).unwrap(), None);
+        r.finish().unwrap();
+
+        let idlen = u16::from_be_bytes([auth[53], auth[54]]) as usize;
+        let id = auth[55..55 + idlen].to_vec();
+        // The COSE key, read back strictly: OKP, EdDSA, Ed25519, x -- and nothing after.
+        let cose = &auth[55 + idlen..];
+        assert_eq!(cose.len(), COSE_KEY_EDDSA_LEN);
+        let mut r = Reader::new(cose);
+        let mut k = r.map().unwrap();
+        for (label, value) in [(1i64, 1i64), (3, EDDSA), (-1, 6)] {
+            assert_eq!(r.key(&mut k).unwrap(), Some(Key::Int(label)));
+            assert_eq!(r.int().unwrap(), value);
+        }
+        assert_eq!(r.key(&mut k).unwrap(), Some(Key::Int(-2)));
+        let public: [u8; 32] = r.bytes().unwrap().try_into().unwrap();
+        assert_eq!(r.key(&mut k).unwrap(), None);
+        r.finish().unwrap();
+        (id, public, auth, sig)
+    }
+
+    fn verify_eddsa(public: &[u8; 32], msg: &[&[u8]], sig: &[u8]) -> bool {
+        use purecrypto::ec::ed25519::{Ed25519PublicKey, Ed25519Signature};
+        let Ok(sig) = <[u8; 64]>::try_from(sig) else {
+            return false;
+        };
+        let all: Vec<u8> = msg.concat();
+        Ed25519PublicKey::from_bytes(*public)
+            .verify(&all, &Ed25519Signature::from_bytes(sig))
+            .is_ok()
+    }
+
+    /// The (r, s) of the assertion response's signature, read past the credential.
+    fn assertion_parts(resp: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        assert_eq!(resp[0], status::OK, "status {:#04x}", resp[0]);
+        let mut r = Reader::new(&resp[1..]);
+        let mut m = r.map().unwrap();
+        assert_eq!(r.key(&mut m).unwrap(), Some(Key::Int(1)));
+        let mut d = r.map().unwrap();
+        assert_eq!(r.key(&mut d).unwrap(), Some(Key::Text("id")));
+        let id = r.bytes().unwrap().to_vec();
+        assert_eq!(r.key(&mut d).unwrap(), Some(Key::Text("type")));
+        r.text().unwrap();
+        assert_eq!(r.key(&mut m).unwrap(), Some(Key::Int(2)));
+        let a = r.bytes().unwrap().to_vec();
+        assert_eq!(r.key(&mut m).unwrap(), Some(Key::Int(3)));
+        let s = r.bytes().unwrap().to_vec();
+        (id, a, s)
+    }
+
+    /// What OpenSSH's `ssh-keygen -t ed25519-sk` asks for: `[-8]` alone, and an `ssh:`
+    /// application. And the platform's order decides when both are offered.
+    #[test]
+    fn eddsa_registers_and_signs_in_and_the_platforms_order_decides() {
+        let mut env = Fake::new(0);
+        for algs in [&[EDDSA][..], &[EDDSA, ES256], &[-257, EDDSA, ES256]] {
+            let resp = call(&mut env, &make_credential_req("ssh:", algs, &[], None));
+            let (id, public, auth, sig) = registered_eddsa(&resp);
+            assert_eq!(id.len(), CRED_ID_LEN);
+            assert_eq!(id[0], keys::CRED_VERSION_EDDSA);
+            assert_eq!(&auth[..32], &Sha256::digest(b"ssh:"));
+            assert_eq!(sig.len(), 64, "EdDSA signatures are raw, not DER");
+            assert!(verify_eddsa(&public, &[&auth, &[0xCD; 32]], &sig));
+
+            let resp = call(
+                &mut env,
+                &get_assertion_req("ssh:", &[&[9u8; 40], &id], None),
+            );
+            let (got, a, s) = assertion_parts(&resp);
+            assert_eq!(got, id);
+            assert_eq!(a.len(), 37);
+            assert_eq!(a[32], flags::UP);
+            assert!(verify_eddsa(&public, &[&a, &[0xAB; 32]], &s));
+            assert!(!verify_eddsa(&public, &[&a, &[0xAC; 32]], &s));
+        }
+        // ES256 first: ES256, exactly as before EdDSA.
+        let (id, public, ..) = registered(&call(
+            &mut env,
+            &make_credential_req("ssh:", &[ES256, EDDSA], &[], None),
+        ));
+        assert_eq!(id[0], keys::CRED_VERSION);
+        let (_, a, s) = assertion_parts(&call(&mut env, &get_assertion_req("ssh:", &[&id], None)));
+        assert!(verify(&public, &[&a, &[0xAB; 32]], &s));
+    }
+
+    /// An EdDSA id is excluded like any other of ours, and its algorithm byte cannot be
+    /// changed to get an ES256 signature out of it.
+    #[test]
+    fn an_eddsa_id_is_excluded_and_cannot_be_relabelled() {
+        let mut env = Fake::new(0);
+        let (id, ..) = registered_eddsa(&call(
+            &mut env,
+            &make_credential_req("ssh:", &[EDDSA], &[], None),
+        ));
+        let resp = call(
+            &mut env,
+            &make_credential_req("ssh:", &[ES256], &[&id], None),
+        );
+        assert_eq!(
+            resp,
+            [status::CREDENTIAL_EXCLUDED],
+            "excluded whatever is asked for"
+        );
+        let mut relabelled = id.clone();
+        relabelled[0] = keys::CRED_VERSION;
+        let resp = call(
+            &mut env,
+            &get_assertion_req("ssh:", &[&relabelled], Some(false)),
+        );
+        assert_eq!(resp, [status::NO_CREDENTIALS]);
+    }
+
+    /// `ssh-keygen -O resident`: an EdDSA passkey, found without an allow list, signing
+    /// with the same key it registered.
+    #[test]
+    fn an_eddsa_passkey_is_found_and_signs_with_its_own_key() {
+        let mut env = Fake::new(0);
+        let (id, public, ..) = registered_eddsa(&call(
+            &mut env,
+            &make_credential_req("ssh:", &[EDDSA], &[], Some(("rk", true))),
+        ));
+        let (es_id, es_public, ..) = registered(&call(
+            &mut env,
+            &make_credential_req("other.example", &[ES256], &[], Some(("rk", true))),
+        ));
+        let (got, a, s) = assertion_parts(&call(&mut env, &get_assertion_req("ssh:", &[], None)));
+        assert_eq!(got, id, "the id is rebuilt with its algorithm");
+        assert!(verify_eddsa(&public, &[&a, &[0xAB; 32]], &s));
+        let (got, a, s) = assertion_parts(&call(
+            &mut env,
+            &get_assertion_req("other.example", &[], None),
+        ));
+        assert_eq!(got, es_id);
+        assert!(verify(&es_public, &[&a, &[0xAB; 32]], &s));
+    }
+
     #[test]
     fn the_exclude_list_is_honoured_after_the_person_answers() {
         let mut env = Fake::new(0);
@@ -1751,7 +1948,8 @@ pub(crate) mod tests {
         let mut env = Fake::new(0);
         let cases: &[(Vec<u8>, u8)] = &[
             (
-                make_credential_req("a.com", &[-8, -257], &[], None),
+                // RS256 and ES384: real algorithms, neither one this device does.
+                make_credential_req("a.com", &[-257, -35], &[], None),
                 status::UNSUPPORTED_ALGORITHM,
             ),
             (

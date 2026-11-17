@@ -14,7 +14,7 @@ Stock has no security key; this is a CatCard addition.
 | protocols | CTAP 2.1 (`FIDO_2_0`, `FIDO_2_1`) and U2F (`U2F_V2`) |
 | user verification | the **client PIN**, typed in the browser; PIN/UV auth protocols 2 and 1 |
 | passkeys | up to **50 per wallet** (mk4/mk5/Q1), in a sealed file of their own; none on the mk3 |
-| algorithm | ES256 only (ECDSA P-256, SHA-256), RFC 6979 deterministic nonces |
+| algorithms | ES256 (ECDSA P-256, SHA-256, RFC 6979 nonces) and EdDSA (Ed25519, RFC 8032); U2F is ES256 only |
 | attestation | `packed` self-attestation (CTAP2); a per-registration self-signed certificate (U2F) |
 | sign counter | always 0 ("no counter", WebAuthn L2 §6.1.1) |
 | code | `crates/catcard-fido` (protocol, host-tested), `crates/catcard-fw/src/fido.rs` (glue) |
@@ -82,7 +82,7 @@ A passkey registration adds "Saved on this device as a passkey." to the Register
 | CTAP2 command | |
 |---|---|
 | `authenticatorGetInfo` | answered at once, without the screen |
-| `authenticatorMakeCredential` | ES256, `excludeList` honoured, `packed` self-attestation; `rk` stores a passkey; a PIN token sets UV |
+| `authenticatorMakeCredential` | ES256 or EdDSA, the first of the platform's list this device does; `excludeList` honoured, `packed` self-attestation; `rk` stores a passkey; a PIN token sets UV |
 | `authenticatorGetAssertion` | an `allowList`, or none: this wallet's passkeys for the site, newest first |
 | `authenticatorGetNextAssertion` | the site's other passkeys, within 30 s |
 | `authenticatorClientPIN` | getPINRetries, getKeyAgreement, setPIN, changePIN, getPinToken, getPinUvAuthTokenUsingPinWithPermissions (`mc`, `ga`, `cm`) |
@@ -98,13 +98,13 @@ firmware, 2026-09-27 -- it identifies the model, never a unit or a wallet); opti
 `makeCredUvNotRqd: true`, and no `uv` (no built-in user verification); `pinUvAuthProtocols`
 `[2, 1]`; `minPINLength` 4; `maxMsgSize` 1024; `maxCredentialCountInList` 8;
 `maxCredentialIdLength` 64 (ours are 33); transports `usb`; algorithms
-`[{alg: -7, type: "public-key"}]`; `remainingDiscoverableCredentials` once the wallet's
+`[{alg: -7, type: "public-key"}, {alg: -8, type: "public-key"}]`; `remainingDiscoverableCredentials` once the wallet's
 passkey file has been read this session. No `forcePINChange`: nothing here forces one.
 
 | U2F | |
 |---|---|
 | `U2F_VERSION` | `U2F_V2` |
-| `U2F_REGISTER` | a key handle that is also a CTAP2 credential id |
+| `U2F_REGISTER` | a key handle that is also a CTAP2 credential id (always ES256: U2F is P-256) |
 | `U2F_AUTHENTICATE` | `0x07` check-only, `0x03` enforce presence, `0x08` don't enforce |
 
 Short and extended APDU encodings are both accepted.
@@ -116,7 +116,8 @@ retry for the same site within 10 s succeeds.
 
 **One key space.** A U2F key handle and a CTAP2 credential id are the same thing, bound to
 the same 32-byte site hash, so a site whose U2F AppID hashes like its RP ID (or that uses
-the WebAuthn `appid` extension) finds either from the other.
+the WebAuthn `appid` extension) finds either from the other. An EdDSA credential is the
+exception: U2F cannot sign with it, so to U2F it is someone else's key handle (`0x6A80`).
 
 ### Silent requests
 
@@ -130,7 +131,7 @@ a session may show the seed-reading progress screen (see below).
 
 | request | answer |
 |---|---|
-| no ES256 in `pubKeyCredParams` | `CTAP2_ERR_UNSUPPORTED_ALGORITHM` |
+| neither ES256 (-7) nor EdDSA (-8) in `pubKeyCredParams` | `CTAP2_ERR_UNSUPPORTED_ALGORITHM` |
 | `rk: true` on the mk3 (no passkeys) | `CTAP2_ERR_UNSUPPORTED_OPTION` |
 | `rk: true` with a PIN set and no `pinUvAuthParam` | `CTAP2_ERR_PUAT_REQUIRED` (§6.1.2 step 7) |
 | `uv: true` | `CTAP2_ERR_INVALID_OPTION` (no built-in user verification) |
@@ -227,7 +228,9 @@ more than one to choose from (§6.2.2).
 wallet (same key derivation, same MAC'd 33-byte id, below) plus a record of what the site
 no longer sends: its RP ID (up to 32 bytes, shortened as §6.8.7 prescribes), rpIdHash, the
 credential's 16-byte nonce, `user.id` (≤ 64 bytes), `user.name` and `displayName` (64
-bytes each, cut at a character boundary), and the creation order -- 280 bytes. The same
+bytes each, cut at a character boundary), the creation order, and the algorithm -- 281
+bytes. (Files written before EdDSA are version 1, 280 bytes a record with no algorithm
+byte; they open as all-ES256 and are rewritten as version 2 the next time they change.) The same
 site and `user.id` again replaces the old one (§6.1.2 step 17).
 
 | | |
@@ -280,11 +283,19 @@ master     = HMAC-SHA512(key = "CatCard FIDO v1",
 mac_key    = master[0..32]
 key_key    = master[32..64]
 
-credential id (33 bytes) = 0x01 ‖ nonce (16 bytes, the UI DRBG) ‖ tag (16 bytes)
-tag        = HMAC-SHA256(mac_key, "id" ‖ 0x01 ‖ rpIdHash ‖ nonce)[0..16]
-private key: the first d_i with 1 ≤ d_i < n, for i = 0, 1, ... (at most 16 tries):
+credential id (33 bytes) = v ‖ nonce (16 bytes, the UI DRBG) ‖ tag (16 bytes)
+v          = 0x01 ES256, 0x02 EdDSA
+tag        = HMAC-SHA256(mac_key, "id" ‖ v ‖ rpIdHash ‖ nonce)[0..16]
+ES256 private key: the first d_i with 1 ≤ d_i < n, for i = 0, 1, ... (at most 16 tries):
   d_i      = HMAC-SHA256(key_key, "key" ‖ 0x01 ‖ rpIdHash ‖ nonce ‖ i), big-endian
+EdDSA private key (the RFC 8032 seed):
+  seed     = HMAC-SHA256(key_key, "key" ‖ 0x02 ‖ rpIdHash ‖ nonce ‖ 0x00)
 ```
+
+The algorithm byte is under the tag's MAC, so an id cannot be relabelled to get the other
+algorithm's signature out of it, and it is in the key derivation, so the two never share
+an HMAC output. ES256 ids are exactly what they were before EdDSA was added: every site
+already registered keeps working.
 
 `rpIdHash` is SHA-256 of the RP ID (U2F: the application parameter). A credential id is
 checked by recomputing its tag, compared in constant time; an id made by another wallet,
@@ -337,6 +348,37 @@ print(k.sign(b"catcard fido vector", ec.ECDSA(hashes.SHA256(), deterministic_sig
 
 The id, the public key and the RFC 6979 signature come out byte-identical (cryptography
 50.0.1).
+
+And the EdDSA one (`an_eddsa_vector_cross_checked_with_python_cryptography`), with the
+same `m`, `rp` and `n`:
+
+```python
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization as S
+print((b"\x02" + n + hmac.new(m[:32], b"id\x02" + rp + n, hashlib.sha256).digest()[:16]).hex())
+k = Ed25519PrivateKey.from_private_bytes(hmac.new(m[32:], b"key\x02" + rp + n + b"\0", hashlib.sha256).digest())
+print(k.public_key().public_bytes(S.Encoding.Raw, S.PublicFormat.Raw).hex())
+print(k.sign(b"catcard fido vector").hex())
+```
+
+Byte-identical with cryptography 50.0.0.
+
+## SSH
+
+OpenSSH (8.2 on) uses a FIDO2 key for `sk-` SSH keys, and both kinds work here:
+
+```sh
+ssh-keygen -t ed25519-sk                    # EdDSA; the handle stays in ~/.ssh/id_ed25519_sk
+ssh-keygen -t ecdsa-sk                      # ES256
+ssh-keygen -t ed25519-sk -O resident        # mk4/mk5/Q1: a passkey, `ssh-keygen -K` brings it back
+ssh-keygen -t ed25519-sk -O verify-required # the FIDO PIN at every login, too
+```
+
+The application is `ssh:` unless `-O application=ssh:...` says otherwise; it is the RP ID
+the screen shows. Each login is a sign-in question on the device, which is OpenSSH's
+"touch". A non-resident key needs its handle file and this wallet; a resident one, this
+wallet and its passkey file. Not yet run against OpenSSH itself on a device: the CTAP2
+side is host-tested with the requests `ssh-keygen` makes (`[-8]` alone, an `ssh:` RP ID).
 
 ## The sign counter is always zero
 
@@ -416,8 +458,10 @@ signature. Measured on the host it costs the same as purecrypto's secp256k1 publ
 which is ≈120 ms on an mk4/Q1 (120 MHz): so **≈120-150 ms** per public key and
 **≈200-250 ms** per signature there, about 1.5× that on the mk3 (80 MHz). Per request:
 GetAssertion ≈ one signature; MakeCredential ≈ a public key and a signature; U2F
-REGISTER ≈ a public key and two signatures (certificate and registration). These are
-estimates to confirm on hardware. The first request of a session also pays for the
+REGISTER ≈ a public key and two signatures (certificate and registration). EdDSA
+(purecrypto's Ed25519, no `ed25519-table`) does two fixed-base multiplications per
+assertion -- the public key, which signing hashes in, and the nonce point -- and has not
+been timed on a device. These are estimates to confirm on hardware. The first request of a session also pays for the
 master (seed fetch and stretch, a few seconds, with its progress screen). The masked
 windows pause the USB task, so keepalives stop for the length of one signature.
 

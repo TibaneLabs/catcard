@@ -1051,13 +1051,12 @@ fn passkey_file(
 #[cfg(not(feature = "board-mk3"))]
 #[inline(never)]
 fn read_passkey_file(path: &str) -> Result<(crate::heap::Block, Option<usize>), u8> {
-    use passkeys::{CAPACITY, REC_LEN, file_len};
     const FAIL: u8 = ctap2::status::OTHER;
     // SAFETY: the region is mapped and readable; nothing is written through this.
     let mut files = unsafe { crate::settings::Files::mount_read_only() }.map_err(|_| FAIL)?;
     let len = files.file_len(path);
-    let count = len.map_or(0, |n| n.saturating_sub(file_len(0)) / REC_LEN);
-    let size = file_len((count + 1).min(CAPACITY));
+    // Room for one more, and for a version 1 file to widen as it opens.
+    let size = passkeys::buffer_for(len);
     if len.is_some_and(|n| n > size) {
         crate::catlog!("fido: the passkey file is too large to be ours");
         return Err(FAIL);

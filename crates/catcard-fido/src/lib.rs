@@ -20,8 +20,8 @@
 //!
 //! Sources, cited per item as `[C]`: FIDO CTAP 2.1 Proposed Standard (2021-06-15) incl.
 //! §11.2 CTAPHID; FIDO U2F Raw Message Formats v1.2; W3C WebAuthn Level 2; RFC 8949
-//! (CBOR); RFC 9052/9053 (COSE); SEC 1 v2 and FIPS 186-5 (P-256 ECDSA); RFC 6979
-//! (deterministic nonces); RFC 5280 and ITU-T X.690 (X.509, DER).
+//! (CBOR); RFC 9052/9053 (COSE); SEC 1 v2 and FIPS 186-5 (P-256 ECDSA); RFC 8032
+//! (Ed25519); RFC 6979 (deterministic nonces); RFC 5280 and ITU-T X.690 (X.509, DER).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
