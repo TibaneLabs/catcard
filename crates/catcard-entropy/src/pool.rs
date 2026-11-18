@@ -4,7 +4,8 @@
 //!
 //! The stock Coldcard firmware derives the BIP-39 wallet seed from two chained
 //! software PRNGs XORed together, not from the hardware TRNG. On mk3 the whole state
-//! reduces to roughly 22 bits; on mk4 a partial mitigation reseeds only 32 bits of it.
+//! reduces to roughly 22 bits; on mk4 a partial mitigation reseeds only 32 bits of it,
+//! and the seed has about 65.
 //! Two specific mistakes made that possible, and this module is built to make both
 //! unrepresentable:
 //!

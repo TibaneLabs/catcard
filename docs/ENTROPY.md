@@ -15,7 +15,9 @@ first word encodes wafer die coordinates and is therefore small — and it is pu
 since it is the device's USB serial number.
 
 mk4 and later reseed from the two secure-element TRNGs at boot, which helps, but the
-reseed is **truncated to 32 bits** and applied to only one of the two generators.
+reseed is **truncated to 32 bits** and applied to only one of the two generators. The
+seed that comes out has about 65 bits of real entropy, not the 128 or 256 its length
+claims.
 
 Three mistakes are worth naming separately, because they are what the design below is
 shaped around:

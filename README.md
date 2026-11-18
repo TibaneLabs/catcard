@@ -29,8 +29,8 @@ CI, or building it yourself instead: [Images built for you](#images-built-for-yo
 
 The stock Coldcard firmware derives its BIP-39 wallet seed from two chained software
 PRNGs, not from the hardware TRNG the chip provides. On mk3 the resulting seed has on
-the order of 22 bits of real entropy; on mk4 a partial mitigation raises the floor to
-about 32. That is the immediate reason this project exists, and it is why the entropy
+the order of 22 bits of real entropy; on mk4 and later a partial mitigation raises that
+to about 65. That is the immediate reason this project exists, and it is why the entropy
 subsystem is the first thing built here rather than the last. See
 [`docs/ENTROPY.md`](docs/ENTROPY.md).
 
