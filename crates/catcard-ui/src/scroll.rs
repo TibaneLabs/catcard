@@ -345,17 +345,18 @@ fn fit_prefix(face: &dyn Face, s: &str, avail: usize) -> usize {
 /// menu label is still one selectable item and a wrapped secret still one marked block.
 pub fn wrap<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>) -> Lines<'a> {
     let mut out = Lines::new();
-    wrap_into(lines, width, fonts, &mut out);
+    let _ = wrap_into(lines, width, fonts, &mut out);
     out
 }
 
-/// [`wrap`], appending to `out`.
-fn wrap_into<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>, out: &mut Lines<'a>) {
+/// [`wrap`], appending to `out`. False if `out` ran out of room, so some of the document --
+/// a whole line, or the end of one -- is not in it.
+fn wrap_into<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>, out: &mut Lines<'a>) -> bool {
     let avail = text_width(width, fonts);
     for line in lines {
         let face = fonts.face(line.size);
         if !line.wrap || avail == 0 || width_of(face, line.text) <= avail {
-            let _ = out.push(VisualLine {
+            let pushed = out.push(VisualLine {
                 text: line.text,
                 size: line.size,
                 align: line.align,
@@ -365,8 +366,8 @@ fn wrap_into<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>, out: &mut 
                 mark: line.mark,
                 toggle: line.toggle,
             });
-            if out.is_full() {
-                break;
+            if pushed.is_err() {
+                return false;
             }
             continue;
         }
@@ -375,7 +376,7 @@ fn wrap_into<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>, out: &mut 
         while !rest.is_empty() {
             let take = fit_prefix(face, rest, avail);
             let (head, tail) = rest.split_at(take);
-            let _ = out.push(VisualLine {
+            let pushed = out.push(VisualLine {
                 text: head,
                 size: line.size,
                 align: line.align,
@@ -387,13 +388,14 @@ fn wrap_into<'a>(lines: &[Line<'a>], width: usize, fonts: &Fonts<'_>, out: &mut 
                 mark: if first { line.mark } else { None },
                 toggle: if first { line.toggle } else { None },
             });
+            if pushed.is_err() {
+                return false;
+            }
             first = false;
             rest = tail.trim_start_matches(' ');
-            if out.is_full() {
-                break;
-            }
         }
     }
+    true
 }
 
 /// A document laid out for a viewport, scrolled by the pixel.
@@ -414,6 +416,8 @@ pub struct ScrollView<'a> {
     /// Whether the cursor comes round the other side at the ends of a menu. Off unless a
     /// caller asks, so a document keeps the scroll-past-the-end behaviour by default.
     wrap_cursor: bool,
+    /// Whether every line of the document is in `lines`. See [`Self::whole`].
+    whole: bool,
 }
 
 impl<'a> ScrollView<'a> {
@@ -421,6 +425,9 @@ impl<'a> ScrollView<'a> {
     /// line and is scrolled into view.
     pub fn new(lines: Lines<'a>, fonts: Fonts<'a>, width: usize, height: usize) -> Self {
         let cursor = lines.iter().position(|l| l.menu_item.is_some());
+        // Wrapped elsewhere, so whether anything was left out is not known here: a full
+        // set of lines may have had more behind it.
+        let whole = !lines.is_full();
         let mut v = Self {
             lines,
             fonts,
@@ -431,6 +438,7 @@ impl<'a> ScrollView<'a> {
             scramble: None,
             marquee: 0,
             wrap_cursor: false,
+            whole,
         };
         v.ensure_cursor_visible();
         v
@@ -451,11 +459,19 @@ impl<'a> ScrollView<'a> {
             scramble: None,
             marquee: 0,
             wrap_cursor: false,
+            whole: true,
         };
-        wrap_into(src, width, &v.fonts, &mut v.lines);
+        v.whole = wrap_into(src, width, &v.fonts, &mut v.lines);
         v.cursor = v.lines.iter().position(|l| l.menu_item.is_some());
         v.ensure_cursor_visible();
         v
+    }
+
+    /// Whether the whole document fits in the view's [`MAX_LINES`]. False when the end of
+    /// it was left out, which a list can live with and a screen asking for approval cannot:
+    /// scrolled to its end, it would look read to the end. Such a screen refuses instead.
+    pub fn whole(&self) -> bool {
+        self.whole
     }
 
     /// Turn on the sensitive-line marker with a per-viewing seed.
@@ -1028,6 +1044,33 @@ mod tests {
             colour: false,
             scrollbar: 3,
         }
+    }
+
+    #[test]
+    fn a_document_that_fills_the_view_exactly_is_whole() {
+        let doc = [Line::body("x"); MAX_LINES];
+        let view = ScrollView::build(&doc, 320, 200, fonts());
+        assert_eq!(view.lines.len(), MAX_LINES);
+        assert!(view.whole());
+    }
+
+    #[test]
+    fn a_document_with_a_line_past_the_room_says_it_is_not_whole() {
+        // The last line is the one left out, and the last line of an approval screen is
+        // the one that matters: scrolled to the end, the view must not look complete.
+        let doc = [Line::body("x"); MAX_LINES + 1];
+        assert!(!ScrollView::build(&doc, 320, 200, fonts()).whole());
+    }
+
+    #[test]
+    fn a_line_cut_short_by_the_room_is_not_whole_either() {
+        // The last line fits its first row but not the rest of its text.
+        let long = "word ".repeat(40);
+        let mut doc = [Line::body("x"); MAX_LINES];
+        doc[MAX_LINES - 1] = Line::body(&long).wrapped();
+        let view = ScrollView::build(&doc, 320, 200, fonts());
+        assert_eq!(view.lines.len(), MAX_LINES);
+        assert!(!view.whole());
     }
 
     #[test]

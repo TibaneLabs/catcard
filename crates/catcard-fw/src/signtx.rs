@@ -1786,30 +1786,50 @@ pub(crate) fn review(
     let mut start = 0usize;
     loop {
         let got = fill(start, &mut page);
-        let last = start + got >= summary.outputs;
-        // A page that filled nothing and is not the last would be an output nobody sees.
-        // Refuse rather than sign past it; `destinations_from` does not do this, but the
-        // rule is stated here so no caller can.
-        if got == 0 && !last {
-            return false;
-        }
-        if !review_page(
-            ui,
-            psbt,
-            summary,
-            signable,
-            unlisted,
-            &page[..got],
-            start,
-            last,
-        ) {
-            return false;
-        }
+        let mut shown = got;
+        let last = loop {
+            let last = start + shown >= summary.outputs;
+            // A page that filled nothing and is not the last would be an output nobody
+            // sees. Refuse rather than sign past it; `destinations_from` does not do this,
+            // but the rule is stated here so no caller can.
+            if shown == 0 && !last {
+                return false;
+            }
+            match review_page(
+                ui,
+                psbt,
+                summary,
+                signable,
+                unlisted,
+                &page[..shown],
+                start,
+                last,
+            ) {
+                Page::Answered(false) => return false,
+                Page::Answered(true) => break last,
+                // More text than a screen's document holds -- long keys, warnings under
+                // every output, a narrow panel. The same outputs, fewer to a page, until
+                // they fit; one that does not fit alone is not shown, so not signed.
+                Page::TooLong if shown > 1 => shown /= 2,
+                Page::TooLong => {
+                    crate::catlog!("sign: output {} does not fit a review page", start + 1);
+                    return false;
+                }
+            }
+        };
         if last {
             return true;
         }
-        start += got;
+        start += shown;
     }
+}
+
+/// How a page of the review ended.
+enum Page {
+    /// The owner answered: true for the confirm key on a page read to its end.
+    Answered(bool),
+    /// The page did not fit the screen's document and was not shown.
+    TooLong,
 }
 
 /// One page of the review: the totals and warnings on the first, the outputs from
@@ -1824,7 +1844,7 @@ fn review_page(
     shown: &[psbtview::Destination],
     start: usize,
     last: bool,
-) -> bool {
+) -> Page {
     use catcard_ui::scroll::{Line, ScrollView};
     use core::fmt::Write as _;
 
@@ -1842,10 +1862,12 @@ fn review_page(
         crate::heap::room::<heapless::Vec<Text, LINES>>().map(|r| r.fill(heapless::Vec::new()))
     else {
         crate::catlog!("sign: no memory for the review page");
-        return false;
+        return Page::Answered(false);
     };
     let texts = &mut *held;
     let mut small: heapless::Vec<bool, LINES> = heapless::Vec::new();
+    // A line with no room is a page that cannot be shown whole, and is not shown.
+    let lost = core::cell::Cell::new(false);
     let mut wrapped: heapless::Vec<bool, LINES> = heapless::Vec::new();
     let say = |texts: &mut heapless::Vec<Text, LINES>,
                small_v: &mut heapless::Vec<bool, LINES>,
@@ -1853,9 +1875,11 @@ fn review_page(
                text: Text,
                is_small: bool,
                wrap: bool| {
-        if texts.push(text).is_ok() {
-            let _ = small_v.push(is_small);
-            let _ = wrap_v.push(wrap);
+        if texts.push(text).is_err()
+            || small_v.push(is_small).is_err()
+            || wrap_v.push(wrap).is_err()
+        {
+            lost.set(true);
         }
     };
 
@@ -2054,9 +2078,14 @@ fn review_page(
         if wrapped[i] {
             l = l.wrapped();
         }
-        let _ = doc.push(l);
+        lost.set(lost.get() || doc.push(l).is_err());
     }
 
     let mut view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
-    menu::scroll_choice(ui, &mut view)
+    // Every line, or none: a page short of its end would scroll to what looks like its end
+    // and offer the key that signs what was cut off.
+    if lost.get() || !view.whole() {
+        return Page::TooLong;
+    }
+    Page::Answered(menu::scroll_choice(ui, &mut view))
 }
