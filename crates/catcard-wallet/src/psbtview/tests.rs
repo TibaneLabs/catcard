@@ -472,6 +472,46 @@ fn a_fee_above_the_cap_is_refused_and_the_cap_is_configurable() {
     assert_eq!(s.fee_percent, 25);
 }
 
+/// The cap is "more than 10%", and a fee a hair under 11% is more than 10%. Comparing a
+/// percentage rounded down let it through as "10", and hid the warning up to just under
+/// 6% the same way.
+#[test]
+fn the_fee_cap_and_warning_compare_the_exact_share_not_a_rounded_one() {
+    let mut buf = vec![0u8; 8192];
+    let pay = |fee: u64, buf: &mut [u8]| {
+        build(
+            &[ours_spend(90_000 + fee)],
+            &[Pay {
+                phrase: STRANGER,
+                steps: RECEIVE,
+                amount: 90_000,
+                claim_ours: false,
+            }],
+            buf,
+        )
+    };
+    // 9 899 on 90 000 sent: 10.998%. Reported rounded up, so it reads as over the cap.
+    let n = pay(9_899, &mut buf);
+    assert_eq!(
+        summary_of(&buf[..n]),
+        Err(Refusal::FeeTooHigh {
+            percent: 11,
+            cap: 10
+        })
+    );
+    // Exactly 10% is not more than 10%.
+    let n = pay(9_000, &mut buf);
+    let s = summary_of(&buf[..n]).unwrap();
+    assert_eq!((s.fee_percent, s.fee_warn), (10, true));
+    // 5 399 on 90 000: 5.998%, over the warning level.
+    let n = pay(5_399, &mut buf);
+    let s = summary_of(&buf[..n]).unwrap();
+    assert_eq!((s.fee_percent, s.fee_warn), (5, true));
+    // Exactly 5% is not.
+    let n = pay(4_500, &mut buf);
+    assert!(!summary_of(&buf[..n]).unwrap().fee_warn);
+}
+
 #[test]
 fn a_sighash_type_we_do_not_produce_stops_the_signing() {
     let mut buf = vec![0u8; 8192];

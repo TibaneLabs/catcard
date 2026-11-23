@@ -65,6 +65,12 @@ impl Default for Policy {
     }
 }
 
+/// Whether `fee` is more than `percent` percent of `base`, exactly: no rounding, so a
+/// share a fraction over the line is over it. A zero base takes no share.
+fn share_above(fee: u64, base: u64, percent: u32) -> bool {
+    base > 0 && u128::from(fee) * 100 > u128::from(percent) * u128::from(base)
+}
+
 /// Why a transaction will not be signed.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Refusal {
@@ -680,6 +686,7 @@ pub fn summarise(
     // cap cannot be applied and the screen says "unknown" in its place. Our own inputs
     // are always priced, or the transaction was refused above.
     let fee_known = unpriced == 0;
+    let fee_base = if sending == 0 { total_in } else { sending };
     let (fee, fee_percent) = if fee_known {
         if total_out > total_in {
             return Err(Refusal::Unbalanced);
@@ -690,16 +697,19 @@ pub fn summarise(
         // nothing sent -- a consolidation back to ourselves -- there is no payment to take
         // a share of, and the fee is measured against what is being moved, the inputs.
         // (Against zero it read as 100%, so every consolidation with a fee was refused.)
-        let base = if sending == 0 { total_in } else { sending };
-        let fee_percent = match fee.saturating_mul(100).checked_div(base) {
+        let fee_percent = match fee.saturating_mul(100).checked_div(fee_base) {
             Some(p) => u32::try_from(p).unwrap_or(u32::MAX),
             // No inputs priced at all leaves no fee either: `fee` is `total_in` less
             // the outputs.
             None => 0,
         };
-        if fee_percent > policy.max_fee_percent {
+        // The cap is on the share itself, not on the whole percent above, which is
+        // rounded down: 10.99% is more than 10%, and was let through as "10".
+        if share_above(fee, fee_base, policy.max_fee_percent) {
             return Err(Refusal::FeeTooHigh {
-                percent: fee_percent,
+                // Rounded up, so the refusal never names a figure inside the cap.
+                percent: u32::try_from(fee.saturating_mul(100).div_ceil(fee_base))
+                    .unwrap_or(u32::MAX),
                 cap: policy.max_fee_percent,
             });
         }
@@ -724,7 +734,7 @@ pub fn summarise(
         change,
         fee,
         fee_percent,
-        fee_warn: fee_known && fee_percent > policy.warn_fee_percent,
+        fee_warn: fee_known && share_above(fee, fee_base, policy.warn_fee_percent),
         fee_known,
         unpriced,
         odd_sighash,
