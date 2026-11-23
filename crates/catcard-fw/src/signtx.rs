@@ -1786,30 +1786,50 @@ pub(crate) fn review(
     let mut start = 0usize;
     loop {
         let got = fill(start, &mut page);
-        let last = start + got >= summary.outputs;
-        // A page that filled nothing and is not the last would be an output nobody sees.
-        // Refuse rather than sign past it; `destinations_from` does not do this, but the
-        // rule is stated here so no caller can.
-        if got == 0 && !last {
-            return false;
-        }
-        if !review_page(
-            ui,
-            psbt,
-            summary,
-            signable,
-            unlisted,
-            &page[..got],
-            start,
-            last,
-        ) {
-            return false;
-        }
+        let mut shown = got;
+        let last = loop {
+            let last = start + shown >= summary.outputs;
+            // A page that filled nothing and is not the last would be an output nobody
+            // sees. Refuse rather than sign past it; `destinations_from` does not do this,
+            // but the rule is stated here so no caller can.
+            if shown == 0 && !last {
+                return false;
+            }
+            match review_page(
+                ui,
+                psbt,
+                summary,
+                signable,
+                unlisted,
+                &page[..shown],
+                start,
+                last,
+            ) {
+                Page::Answered(false) => return false,
+                Page::Answered(true) => break last,
+                // More text than a screen's document holds -- long keys, warnings under
+                // every output, a narrow panel. The same outputs, fewer to a page, until
+                // they fit; one that does not fit alone is not shown, so not signed.
+                Page::TooLong if shown > 1 => shown /= 2,
+                Page::TooLong => {
+                    crate::catlog!("sign: output {} does not fit a review page", start + 1);
+                    return false;
+                }
+            }
+        };
         if last {
             return true;
         }
-        start += got;
+        start += shown;
     }
+}
+
+/// How a page of the review ended.
+enum Page {
+    /// The owner answered: true for the confirm key on a page read to its end.
+    Answered(bool),
+    /// The page did not fit the screen's document and was not shown.
+    TooLong,
 }
 
 /// One page of the review: the totals and warnings on the first, the outputs from
@@ -1824,7 +1844,7 @@ fn review_page(
     shown: &[psbtview::Destination],
     start: usize,
     last: bool,
-) -> bool {
+) -> Page {
     use catcard_ui::scroll::{Line, ScrollView};
     use core::fmt::Write as _;
 
@@ -1834,7 +1854,33 @@ fn review_page(
     const LINES: usize = 12 + MAX_RELATIVE_SHOWN + 3 * PAGE;
     /// Relative locks named on the first page before the rest are only counted.
     const MAX_RELATIVE_SHOWN: usize = 4;
-    type Text = heapless::String<72>;
+    /// A row of the page's text, which remembers whether anything written to it was cut
+    /// off: a row short of its end is a page that cannot be shown whole.
+    struct Text {
+        text: heapless::String<72>,
+        cut: bool,
+    }
+    impl Text {
+        const fn new() -> Self {
+            Self {
+                text: heapless::String::new(),
+                cut: false,
+            }
+        }
+        fn as_str(&self) -> &str {
+            self.text.as_str()
+        }
+    }
+    impl core::fmt::Write for Text {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            // `push_str` writes all of `s` or none of it.
+            if self.text.push_str(s).is_err() {
+                self.cut = true;
+                return Err(core::fmt::Error);
+            }
+            Ok(())
+        }
+    }
 
     // Three kilobytes of text: in a heap block, not on the stack under the signing flow.
     // No room is a review that cannot be shown, and what is not shown is not signed.
@@ -1842,20 +1888,18 @@ fn review_page(
         crate::heap::room::<heapless::Vec<Text, LINES>>().map(|r| r.fill(heapless::Vec::new()))
     else {
         crate::catlog!("sign: no memory for the review page");
-        return false;
+        return Page::Answered(false);
     };
     let texts = &mut *held;
     let mut small: heapless::Vec<bool, LINES> = heapless::Vec::new();
-    let mut wrapped: heapless::Vec<bool, LINES> = heapless::Vec::new();
+    // A line with no room is a page that cannot be shown whole, and is not shown.
+    let lost = core::cell::Cell::new(false);
     let say = |texts: &mut heapless::Vec<Text, LINES>,
                small_v: &mut heapless::Vec<bool, LINES>,
-               wrap_v: &mut heapless::Vec<bool, LINES>,
                text: Text,
-               is_small: bool,
-               wrap: bool| {
-        if texts.push(text).is_ok() {
-            let _ = small_v.push(is_small);
-            let _ = wrap_v.push(wrap);
+               is_small: bool| {
+        if text.cut || texts.push(text).is_err() || small_v.push(is_small).is_err() {
+            lost.set(true);
         }
     };
 
@@ -1864,7 +1908,7 @@ fn review_page(
         btc(summary.sending, &mut amount);
         let mut line = Text::new();
         let _ = write!(line, "Sending {amount}");
-        say(texts, &mut small, &mut wrapped, line, false, false);
+        say(texts, &mut small, line, false);
 
         // The fee, or that there is none to state. A foreign input priced on the host's
         // word alone -- a coinjoin's -- leaves the fee unknown, and "unknown" is what
@@ -1881,22 +1925,22 @@ fn review_page(
                 summary.fee_percent,
                 if summary.fee_warn { " HIGH" } else { "" }
             );
-            say(texts, &mut small, &mut wrapped, line, false, false);
+            say(texts, &mut small, line, false);
         } else {
             let _ = write!(line, "Fee UNKNOWN");
-            say(texts, &mut small, &mut wrapped, line, false, false);
+            say(texts, &mut small, line, false);
             let mut line = Text::new();
             let _ = write!(
                 line,
                 "{} input(s) unverified: fee cap not checked",
                 summary.unpriced
             );
-            say(texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, line, true);
         }
 
         let mut line = Text::new();
         let _ = write!(line, "{} of {} inputs ours", signable, summary.inputs);
-        say(texts, &mut small, &mut wrapped, line, true, false);
+        say(texts, &mut small, line, true);
 
         // A computer's request signs only the keys it listed. Inputs this wallet could
         // sign with another key are left alone, and the review says how many, so a
@@ -1904,7 +1948,7 @@ fn review_page(
         if unlisted > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{unlisted} more of ours NOT signed: not asked for");
-            say(texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, line, true);
         }
 
         // A bare P2PK input has no address to show, so the review says what it is.
@@ -1912,7 +1956,7 @@ fn review_page(
         if summary.p2pk_inputs > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{} P2PK input(s)", summary.p2pk_inputs);
-            say(texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, line, true);
         }
 
         // An opted-in transaction is signed under the unified message, which only the
@@ -1923,7 +1967,7 @@ fn review_page(
         if summary.opted_in {
             let mut line = Text::new();
             let _ = write!(line, "OPT-IN sighash: fork only");
-            say(texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, line, true);
         }
 
         // An unusual sighash type was already warned about on its own screen; the row
@@ -1931,7 +1975,7 @@ fn review_page(
         if summary.odd_total > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{} input(s) NOT SIGHASH_ALL", summary.odd_total);
-            say(texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, line, true);
         }
 
         // Timelocks, only when set. An absolute lock the network will not enforce --
@@ -1947,7 +1991,7 @@ fn review_page(
             if !lock.effective {
                 let _ = write!(line, " (INEFFECTIVE)");
             }
-            say(texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, line, true);
         }
         let tx = psbt.unsigned_tx();
         let mut relatives = 0usize;
@@ -1963,7 +2007,7 @@ fn review_page(
                 }
                 timelock::Relative::Seconds(s) => write!(line, "input {input}: wait {s} s"),
             };
-            say(texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, line, true);
         }
         if relatives > MAX_RELATIVE_SHOWN {
             let mut line = Text::new();
@@ -1972,12 +2016,13 @@ fn review_page(
                 "and {} more timelocked input(s)",
                 relatives - MAX_RELATIVE_SHOWN
             );
-            say(texts, &mut small, &mut wrapped, line, true, false);
+            say(texts, &mut small, line, true);
         }
     }
 
-    // Where this page sits, when there is more than one.
-    if summary.outputs > PAGE {
+    // Where this page sits, when it does not hold every output: more than a page of them,
+    // or fewer that `review` had to split because they did not fit one.
+    if start > 0 || !last {
         let mut line = Text::new();
         let _ = write!(
             line,
@@ -1986,7 +2031,7 @@ fn review_page(
             start + shown.len(),
             summary.outputs
         );
-        say(texts, &mut small, &mut wrapped, line, true, false);
+        say(texts, &mut small, line, true);
     }
 
     for d in shown {
@@ -2008,21 +2053,34 @@ fn review_page(
                 ""
             }
         );
-        say(texts, &mut small, &mut wrapped, line, true, false);
+        say(texts, &mut small, line, true);
         if d.address_len > 0 {
             let mut line = Text::new();
             let _ = write!(line, "{}", d.address());
-            say(texts, &mut small, &mut wrapped, line, true, true);
+            say(texts, &mut small, line, true);
         }
         // Stock's suspicious-change warning: proven change, on a path no wallet would
         // choose. Said with the path, so the owner can see for themselves; not a
         // refusal. Source: hw-reference/firmware-features.md §5 "suspicious change" [C]
         if let Some(why) = d.unusual {
-            let mut line = Text::new();
-            let _ = write!(line, "unusual change path ");
-            let _ = d.write_path(&mut line);
-            let _ = write!(line, ": {}", why.text());
-            say(texts, &mut small, &mut wrapped, line, true, true);
+            // A path is up to `MAX_STEPS` levels of up to twelve characters each, longer
+            // than a row: written whole here, then shared out over as many rows as it
+            // takes, which the screen wraps as it would one long row.
+            let mut long = heapless::String::<WARNING_LEN>::new();
+            let written = write!(long, "unusual change path ")
+                .and_then(|()| d.write_path(&mut long))
+                .and_then(|()| write!(long, ": {}", why.text()));
+            if written.is_err() {
+                lost.set(true);
+            }
+            let mut rest = long.as_str();
+            while !rest.is_empty() {
+                let mut line = Text::new();
+                let take = row_break(rest, line.text.capacity());
+                let _ = line.write_str(&rest[..take]);
+                say(texts, &mut small, line, true);
+                rest = &rest[take..];
+            }
         }
     }
 
@@ -2042,7 +2100,7 @@ fn review_page(
             display::CANCEL_KEY
         );
     }
-    say(texts, &mut small, &mut wrapped, line, true, false);
+    say(texts, &mut small, line, true);
 
     let mut doc: heapless::Vec<Line, { LINES + 1 }> = heapless::Vec::new();
     let _ = doc.push(Line::title("Sign transaction"));
@@ -2051,12 +2109,36 @@ fn review_page(
         if small[i] {
             l = l.small();
         }
-        if wrapped[i] {
-            l = l.wrapped();
-        }
-        let _ = doc.push(l);
+        // Every row may wrap. A row too wide for the panel is otherwise cut at its right
+        // edge -- an amount's last digits, or "HIGH" after a fee -- and still counts as
+        // shown; wrapped, a word wider than the row is split rather than lost.
+        l = l.wrapped();
+        lost.set(lost.get() || doc.push(l).is_err());
     }
 
     let mut view = ScrollView::build(&doc, display::SCREEN_W, display::SCREEN_H, display::FONTS);
-    menu::scroll_choice(ui, &mut view)
+    // Every line, or none: a page short of its end would scroll to what looks like its end
+    // and offer the key that signs what was cut off.
+    if lost.get() || !view.whole() {
+        return Page::TooLong;
+    }
+    Page::Answered(menu::scroll_choice(ui, &mut view))
+}
+
+/// The unusual-change warning at its longest: "unusual change path ", a path of
+/// `signer::MAX_STEPS` levels at up to twelve characters each ("/2147483647h") after its
+/// "m", ": ", and the longest reason with room to spare.
+const WARNING_LEN: usize = 20 + 1 + 12 * signer::MAX_STEPS + 2 + 24;
+
+/// Bytes of `text` for one row of at most `cap` bytes: up to and including the last '/'
+/// or ' ' that fits, so a path breaks between its levels, or `cap` when none does. `text`
+/// is ASCII, so every index is a character boundary.
+fn row_break(text: &str, cap: usize) -> usize {
+    if text.len() <= cap {
+        return text.len();
+    }
+    text.as_bytes()[..cap]
+        .iter()
+        .rposition(|&b| b == b'/' || b == b' ')
+        .map_or(cap, |i| i + 1)
 }
