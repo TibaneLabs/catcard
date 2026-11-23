@@ -323,7 +323,8 @@ pub struct Summary {
     pub change: u64,
     /// The fee, when [`Self::fee_known`]; zero otherwise, which a screen must not print.
     pub fee: u64,
-    /// The fee as a percentage of what is being sent, rounded down.
+    /// The fee as a percentage of what is being sent, rounded down; of the inputs, for a
+    /// consolidation that sends nothing.
     pub fee_percent: u32,
     /// True if the fee is above the policy's warning level but below its cap.
     pub fee_warn: bool,
@@ -684,14 +685,17 @@ pub fn summarise(
             return Err(Refusal::Unbalanced);
         }
         let fee = total_in - total_out;
-        // Against what is being sent, not against the total: a consolidation that pays
-        // itself would otherwise divide by nearly zero and read as a 0% fee.
-        let fee_percent = match fee.saturating_mul(100).checked_div(sending) {
+        // Against what is being sent, not against the total, which change would pad out:
+        // a payment with a large change output must not read as a small fee. With
+        // nothing sent -- a consolidation back to ourselves -- there is no payment to take
+        // a share of, and the fee is measured against what is being moved, the inputs.
+        // (Against zero it read as 100%, so every consolidation with a fee was refused.)
+        let base = if sending == 0 { total_in } else { sending };
+        let fee_percent = match fee.saturating_mul(100).checked_div(base) {
             Some(p) => u32::try_from(p).unwrap_or(u32::MAX),
-            // Nothing is being sent: a consolidation back to ourselves. A fee against
-            // zero has no percentage, so it counts as everything rather than as nothing.
-            None if fee == 0 => 0,
-            None => 100,
+            // No inputs priced at all leaves no fee either: `fee` is `total_in` less
+            // the outputs.
+            None => 0,
         };
         if fee_percent > policy.max_fee_percent {
             return Err(Refusal::FeeTooHigh {

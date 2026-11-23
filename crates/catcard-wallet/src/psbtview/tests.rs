@@ -1795,6 +1795,53 @@ fn a_consolidation_under_an_unusual_sighash_is_refused_even_when_warning() {
     assert_eq!((s.sending, s.change), (0, 100_000));
 }
 
+/// A consolidation pays a fee like any other transaction. With nothing sent there is no
+/// amount to take a share of, so the fee is measured against what is being moved -- the
+/// inputs -- and an ordinary one signs under the default cap instead of reading as 100%.
+#[test]
+fn a_consolidation_with_an_ordinary_fee_passes_the_default_cap() {
+    let mut buf = vec![0u8; 8192];
+    // 1 000 fee moving 100 000: 1%.
+    let n = build(
+        &[ours_spend(100_000)],
+        &[Pay {
+            phrase: OURS,
+            steps: CHANGE,
+            amount: 99_000,
+            claim_ours: true,
+        }],
+        &mut buf,
+    );
+    let s = summary_of(&buf[..n]).unwrap();
+    assert_eq!((s.sending, s.change), (0, 99_000));
+    assert_eq!((s.fee, s.fee_percent, s.fee_warn), (1_000, 1, false));
+}
+
+/// The cap still holds on a consolidation: a fee that eats a fifth of the coins moved is
+/// refused as it would be on a payment.
+#[test]
+fn a_consolidation_that_burns_its_coins_in_fees_is_still_refused() {
+    let mut buf = vec![0u8; 8192];
+    // 20 000 fee moving 100 000: 20%.
+    let n = build(
+        &[ours_spend(100_000)],
+        &[Pay {
+            phrase: OURS,
+            steps: CHANGE,
+            amount: 80_000,
+            claim_ours: true,
+        }],
+        &mut buf,
+    );
+    assert_eq!(
+        summary_of(&buf[..n]),
+        Err(Refusal::FeeTooHigh {
+            percent: 20,
+            cap: 10
+        })
+    );
+}
+
 /// A coinjoin: one input of ours with its previous transaction, two of somebody else's
 /// with a witness UTXO alone or nothing at all. Ours is signed; the fee is unknown and
 /// said to be, rather than computed from amounts nothing checked.
